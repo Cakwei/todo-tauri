@@ -51,16 +51,16 @@ async function main() {
     data: [
       {
         id: crypto.randomUUID(),
-        issuer: "credentials",
-        accountId: userPrimary.email,
+        issuer: "local:credential",
+        accountId: userPrimary.id,
         providerId: "credential",
         userId: userPrimary.id,
         password: hashedPassword,
       },
       {
         id: crypto.randomUUID(),
-        issuer: "credentials",
-        accountId: userSecondary.email,
+        issuer: "local:credential",
+        accountId: userSecondary.id,
         providerId: "credential",
         userId: userSecondary.id,
         password: hashedPassword,

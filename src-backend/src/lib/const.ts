@@ -1,0 +1,8 @@
+process.loadEnvFile();
+
+export const CORSList = [
+	process.env.BETTER_AUTH_URL || "",
+	"tauri://localhost",
+	"http://tauri.localhost",
+	"https://tauri.localhost",
+];

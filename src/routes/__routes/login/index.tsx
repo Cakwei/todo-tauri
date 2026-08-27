@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { AlertCircle, Github, Loader2, Lock, Mail } from "lucide-react";
-import { useState } from "react";
+import { type SubmitEvent, useState } from "react";
 import { authClient } from "#/lib/auth-client";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-export const Route = createFileRoute("/login/")({
+export const Route = createFileRoute("/__routes/login/")({
 	component: Login,
 });
 function Login() {
@@ -23,26 +23,32 @@ function Login() {
 	const [isLoading, setIsLoading] = useState(false);
 	const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-	const handleEmailLogin = async (e: React.FormEvent) => {
-		e.preventDefault();
-		setIsLoading(true);
-		setErrorMessage(null);
+	const handleEmailLogin = async (e: SubmitEvent) => {
+		try {
+			e.preventDefault();
+			setIsLoading(true);
+			setErrorMessage(null);
 
-		await authClient.signIn.email(
-			{
-				email,
-				password,
-			},
-			{
-				onSuccess: () => {
-					window.location.href = "/";
+			await authClient.signIn.email(
+				{
+					email: email,
+					password: password,
 				},
-				onError: (ctx) => {
-					setErrorMessage(ctx.error.message || "Failed to sign in");
-					setIsLoading(false);
+				{
+					onSuccess: () => {
+						console.log("success");
+						window.location.href = "/";
+					},
+					onError: (ctx) => {
+						console.log("onError", ctx);
+						setErrorMessage(ctx.error.message || "Failed to sign in");
+						setIsLoading(false);
+					},
 				},
-			},
-		);
+			);
+		} catch (e) {
+			console.error(e);
+		}
 	};
 
 	const handleSocialLogin = async (provider: "github" | "google") => {

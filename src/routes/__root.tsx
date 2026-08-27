@@ -1,17 +1,25 @@
 import { TanStackDevtools } from "@tanstack/react-devtools";
-import type { QueryClient } from "@tanstack/react-query";
+import {
+	type QueryClient,
+	QueryClientProvider,
+	useQueryClient,
+} from "@tanstack/react-query";
 import {
 	createRootRouteWithContext,
 	HeadContent,
+	Outlet,
 	Scripts,
 } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
+import type { Session, User } from "better-auth";
+import type { ReactNode } from "react";
 import { authClient } from "#/lib/auth-client";
 import TanStackQueryDevtools from "../integrations/tanstack-query/devtools";
 import appCss from "../styles.css?url";
 
 interface MyRouterContext {
 	queryClient: QueryClient;
+	session?: { session: Session; user: User };
 }
 
 export const Route = createRootRouteWithContext<MyRouterContext>()({
@@ -35,28 +43,17 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 			},
 		],
 	}),
-	shellComponent: RootDocument,
-	beforeLoad: async () => {
-		try {
-			const response = await authClient.signIn.email({
-				email: "jane@dev.io",
-				password: "123456789",
-			});
-			console.log("Boop", response.data?.user);
-		} catch (e) {
-			console.error("RootDocument Error @", e);
-		}
-	},
+	component: RootDocument,
 });
 
-function RootDocument({ children }: { children: React.ReactNode }) {
+function RootDocument() {
 	return (
 		<html lang="en">
 			<head>
 				<HeadContent />
 			</head>
 			<body className="dark">
-				{children}
+				<Outlet />
 				<TanStackDevtools
 					config={{
 						position: "bottom-right",

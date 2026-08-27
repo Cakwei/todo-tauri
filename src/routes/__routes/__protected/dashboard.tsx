@@ -21,7 +21,6 @@ import {
 	TrendingUp,
 } from "lucide-react";
 import { useState } from "react";
-import { z } from "zod";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -57,7 +56,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 
 // 1. SEARCH PARAMS SCHEMA DEFINITION
-const todoSearchSchema = z.object({
+/*const todoSearchSchema = z.object({
 	page: z.number().catch(1),
 	limit: z.number().catch(10),
 	search: z.string().optional().catch(""),
@@ -65,11 +64,11 @@ const todoSearchSchema = z.object({
 });
 
 type TodoSearchParams = z.infer<typeof todoSearchSchema>;
-
-export const Route = createFileRoute("/")({
-	validateSearch: (search) => todoSearchSchema.parse(search),
-	component: TodoDashboard,
-});
+*/
+export const Route = createFileRoute("/__routes/__protected/dashboard")({
+	// validateSearch: (search) => todoSearchSchema.parse(search),
+	component: Dashboard,
+	});
 
 // Mock DB Records for API Simulator
 const ALL_MOCK_TODOS = Array.from({ length: 35 }).map((_, i) => ({
@@ -141,7 +140,7 @@ const MOCK_TAGS = [
 	{ id: "t3", name: "Critical" },
 ];
 
-function TodoDashboard() {
+function Dashboard() {
 	const navigate = useNavigate({ from: Route.fullPath });
 	const searchParams = Route.useSearch();
 	const [isCreateOpen, setIsCreateOpen] = useState(false);
