@@ -1,6 +1,7 @@
 import { PrismaMariaDb } from "@prisma/adapter-mariadb";
 import { PrismaClient } from "./generated/prisma/client";
 
+process.loadEnvFile();
 const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {

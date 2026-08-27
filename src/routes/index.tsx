@@ -1,9 +1,11 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
 	BarChart2,
 	Calendar as CalendarIcon,
 	CheckCircle2,
 	CheckSquare,
+	ChevronLeft,
 	ChevronRight,
 	Circle,
 	Clock,
@@ -19,11 +21,17 @@ import {
 	TrendingUp,
 } from "lucide-react";
 import { useState } from "react";
+import { z } from "zod";
 
-// Imports
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+	Card,
+	CardContent,
+	CardFooter,
+	CardHeader,
+	CardTitle,
+} from "@/components/ui/card";
 import {
 	Dialog,
 	DialogContent,
@@ -48,11 +56,79 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
+// 1. SEARCH PARAMS SCHEMA DEFINITION
+const todoSearchSchema = z.object({
+	page: z.number().catch(1),
+	limit: z.number().catch(10),
+	search: z.string().optional().catch(""),
+	tab: z.string().catch("inbox"),
+});
+
+type TodoSearchParams = z.infer<typeof todoSearchSchema>;
+
 export const Route = createFileRoute("/")({
+	validateSearch: (search) => todoSearchSchema.parse(search),
 	component: TodoDashboard,
 });
 
-// --- MOCK DATA MATCHING YOUR PRISMA SCHEMA ---
+// Mock DB Records for API Simulator
+const ALL_MOCK_TODOS = Array.from({ length: 35 }).map((_, i) => ({
+	id: `todo-${i + 1}`,
+	title: `Task #${i + 1}: ${
+		[
+			"Implement drag-and-drop fractional reordering",
+			"Configure MySQL composite indexes",
+			"Setup RRULE recurrence parser",
+			"Optimize Prisma query batching",
+			"Add BetterAuth password hashing",
+		][i % 5]
+	}`,
+	description: "Auto-generated task item for pagination testing.",
+	status: i % 3 === 0 ? "COMPLETED" : i % 2 === 0 ? "IN_PROGRESS" : "TODO",
+	priority: ["LOW", "MEDIUM", "HIGH", "URGENT"][i % 4],
+	dueDate: new Date(Date.now() + i * 86400000).toISOString(),
+	isPinned: i % 7 === 0,
+	projectName: ["Work & Engineering", "Personal Growth", "Side Project"][i % 3],
+	tags: [["Frontend"], ["Database", "Critical"], []][i % 3],
+	subtaskCount: i % 3,
+	attachmentsCount: i % 2,
+}));
+
+// 2. MOCK FETCH API FUNCTION
+async function fetchTodosApi(params: TodoSearchParams) {
+	await new Promise((res) => setTimeout(res, 300)); // Simulate latency
+
+	let filtered = ALL_MOCK_TODOS;
+
+	if (params.tab === "completed") {
+		filtered = filtered.filter((t) => t.status === "COMPLETED");
+	} else if (params.tab === "today") {
+		filtered = filtered.filter((t) => t.status !== "COMPLETED");
+	}
+
+	if (params.search) {
+		const q = params.search.toLowerCase();
+		filtered = filtered.filter(
+			(t) =>
+				t.title.toLowerCase().includes(q) ||
+				t.description.toLowerCase().includes(q),
+		);
+	}
+
+	const total = filtered.length;
+	const totalPages = Math.ceil(total / params.limit) || 1;
+	const start = (params.page - 1) * params.limit;
+	const items = filtered.slice(start, start + params.limit);
+
+	return {
+		items,
+		total,
+		totalPages,
+		page: params.page,
+		limit: params.limit,
+	};
+}
+
 const MOCK_PROJECTS = [
 	{ id: "p1", name: "Work & Engineering", color: "bg-blue-500" },
 	{ id: "p2", name: "Personal Growth", color: "bg-emerald-500" },
@@ -65,71 +141,29 @@ const MOCK_TAGS = [
 	{ id: "t3", name: "Critical" },
 ];
 
-const MOCK_TODOS = [
-	{
-		id: "todo-1",
-		title: "Implement drag-and-drop fractional reordering",
-		description:
-			"Use position float column to allow seamless reordering without updating all index rows.",
-		status: "IN_PROGRESS",
-		priority: "HIGH",
-		dueDate: "2026-08-28T10:00:00Z",
-		estimatedMinutes: 120,
-		actualMinutes: 45,
-		isPinned: true,
-		projectName: "Side Project",
-		tags: ["Frontend"],
-		subtaskCount: 3,
-		attachmentsCount: 1,
-	},
-	{
-		id: "todo-2",
-		title: "Configure MySQL composite indexes for high-read throughput",
-		description:
-			"Index (userId, status) and (userId, dueDate) for quick sidebar filtering.",
-		status: "TODO",
-		priority: "URGENT",
-		dueDate: "2026-08-27T18:00:00Z",
-		estimatedMinutes: 60,
-		actualMinutes: 0,
-		isPinned: false,
-		projectName: "Work & Engineering",
-		tags: ["Database", "Critical"],
-		subtaskCount: 0,
-		attachmentsCount: 2,
-	},
-	{
-		id: "todo-3",
-		title: "Setup RRULE recurrence parser for repeating tasks",
-		description: "Integrate rrule.js to generate next instance when completed.",
-		status: "COMPLETED",
-		priority: "MEDIUM",
-		dueDate: "2026-08-26T12:00:00Z",
-		estimatedMinutes: 90,
-		actualMinutes: 85,
-		isPinned: false,
-		projectName: "Personal Growth",
-		tags: [],
-		subtaskCount: 1,
-		attachmentsCount: 0,
-	},
-];
-
 function TodoDashboard() {
-	const [todos, setTodos] = useState(MOCK_TODOS);
-	const [activeTab, setActiveTab] = useState("inbox");
-	const [searchQuery, setSearchQuery] = useState("");
+	const navigate = useNavigate({ from: Route.fullPath });
+	const searchParams = Route.useSearch();
 	const [isCreateOpen, setIsCreateOpen] = useState(false);
 
-	const toggleComplete = (id: string) => {
-		setTodos((prev) =>
-			prev.map((t) =>
-				t.id === id
-					? { ...t, status: t.status === "COMPLETED" ? "TODO" : "COMPLETED" }
-					: t,
-			),
-		);
+	// 3. TANSTACK QUERY INTEGRATION
+	const { data, isLoading, isPlaceholderData } = useQuery({
+		queryKey: ["todos", searchParams],
+		queryFn: () => fetchTodosApi(searchParams),
+		placeholderData: (previousData) => previousData,
+	});
+
+	const updateSearchParams = (newParams: Partial<TodoSearchParams>) => {
+		navigate({
+			search: (prev) => ({
+				...prev,
+				...newParams,
+			}),
+		});
 	};
+
+	const todos = data?.items ?? [];
+	const totalPages = data?.totalPages ?? 1;
 
 	return (
 		<div
@@ -145,7 +179,6 @@ function TodoDashboard() {
 				}}
 			>
 				<div className="p-4 space-y-6">
-					{/* User Workspace Info */}
 					<div className="flex items-center gap-3 px-2">
 						<div
 							className="h-9 w-9 rounded-lg flex items-center justify-center font-bold shadow-md text-white"
@@ -169,40 +202,31 @@ function TodoDashboard() {
 						</div>
 					</div>
 
-					{/* Core Navigation Views */}
+					{/* Core Navigation Views synced with search params */}
 					<nav className="space-y-1">
 						<SidebarItem
 							icon={
 								<Inbox className="w-4 h-4" style={{ color: "var(--text)" }} />
 							}
 							label="Inbox"
-							count={todos.filter((t) => t.status !== "COMPLETED").length}
-							active={activeTab === "inbox"}
-							onClick={() => setActiveTab("inbox")}
+							active={searchParams.tab === "inbox"}
+							onClick={() => updateSearchParams({ tab: "inbox", page: 1 })}
 						/>
 						<SidebarItem
 							icon={<CalendarIcon className="w-4 h-4 text-emerald-500" />}
 							label="Today"
-							count={1}
-							active={activeTab === "today"}
-							onClick={() => setActiveTab("today")}
-						/>
-						<SidebarItem
-							icon={<Clock className="w-4 h-4 text-amber-500" />}
-							label="Upcoming"
-							active={activeTab === "upcoming"}
-							onClick={() => setActiveTab("upcoming")}
+							active={searchParams.tab === "today"}
+							onClick={() => updateSearchParams({ tab: "today", page: 1 })}
 						/>
 						<SidebarItem
 							icon={<CheckSquare className="w-4 h-4 text-blue-500" />}
 							label="Completed"
-							count={todos.filter((t) => t.status === "COMPLETED").length}
-							active={activeTab === "completed"}
-							onClick={() => setActiveTab("completed")}
+							active={searchParams.tab === "completed"}
+							onClick={() => updateSearchParams({ tab: "completed", page: 1 })}
 						/>
 					</nav>
 
-					{/* Projects Section */}
+					{/* Projects */}
 					<div className="space-y-2 pt-2">
 						<div className="flex items-center justify-between px-2">
 							<span
@@ -222,7 +246,7 @@ function TodoDashboard() {
 							{MOCK_PROJECTS.map((proj) => (
 								<Button
 									key={proj.id}
-									className="bg-(--bg-secondary) w-full flex justify-start hover:bg-(--bg)  px-2.5 py-1.5 rounded-md text-xs transition"
+									className="bg-(--bg-secondary) w-full flex justify-start hover:bg-(--bg) px-2.5 py-1.5 rounded-md text-xs transition"
 								>
 									<span className={`w-2 h-2 rounded-full ${proj.color}`} />
 									<span className="truncate text-(--text)">{proj.name}</span>
@@ -231,7 +255,7 @@ function TodoDashboard() {
 						</div>
 					</div>
 
-					{/* Tags Section */}
+					{/* Tags */}
 					<div className="space-y-2 pt-2">
 						<span
 							className="text-xs font-semibold tracking-wider uppercase px-2"
@@ -249,7 +273,7 @@ function TodoDashboard() {
 					</div>
 				</div>
 
-				{/* User Footer Profile */}
+				{/* User Profile Footer */}
 				<div
 					className="p-3 border-t flex items-center justify-between"
 					style={{ borderColor: "var(--border)" }}
@@ -268,7 +292,6 @@ function TodoDashboard() {
 							<p style={{ color: "var(--text-secondary)" }}>jane@dev.io</p>
 						</div>
 					</div>
-
 					<DropdownMenu>
 						<DropdownMenuTrigger asChild>
 							<Button variant="ghost" size="icon" className="h-7 w-7">
@@ -305,9 +328,11 @@ function TodoDashboard() {
 								style={{ color: "var(--text-secondary)" }}
 							/>
 							<Input
-								placeholder="Search tasks, descriptions, or tags..."
-								value={searchQuery}
-								onChange={(e) => setSearchQuery(e.target.value)}
+								placeholder="Search tasks by title..."
+								value={searchParams.search ?? ""}
+								onChange={(e) =>
+									updateSearchParams({ search: e.target.value, page: 1 })
+								}
 								className="pl-9 h-9"
 								style={{
 									backgroundColor: "var(--bg)",
@@ -341,18 +366,18 @@ function TodoDashboard() {
 					</div>
 				</header>
 
-				{/* Scrollable Dashboard View */}
+				{/* Scrollable View */}
 				<div className="flex-1 overflow-y-auto p-6 space-y-6">
-					{/* Dashboard Metrics Cards */}
+					{/* Stat Metrics */}
 					<div className="grid grid-cols-1 md:grid-cols-4 gap-4">
 						<StatCard
-							title="Total Tasks"
-							value={todos.length}
+							title="Total Loaded"
+							value={data?.total ?? 0}
 							icon={<CheckSquare style={{ color: "var(--link)" }} />}
 						/>
 						<StatCard
-							title="In Progress"
-							value={todos.filter((t) => t.status === "IN_PROGRESS").length}
+							title="Current Page"
+							value={`${searchParams.page} / ${totalPages}`}
 							icon={<Clock className="text-amber-500" />}
 						/>
 						<StatCard
@@ -367,7 +392,7 @@ function TodoDashboard() {
 						/>
 					</div>
 
-					{/* Tasks Main Container */}
+					{/* Tasks Main Table/Card Container */}
 					<Card
 						style={{
 							backgroundColor: "var(--bg-secondary)",
@@ -382,150 +407,234 @@ function TodoDashboard() {
 								className="text-sm font-semibold"
 								style={{ color: "var(--text)" }}
 							>
-								Tasks & Subtasks
+								Tasks ({data?.total ?? 0})
 							</CardTitle>
-							<span
-								className="text-xs"
-								style={{ color: "var(--text-secondary)" }}
-							>
-								Sorted by Position Index
-							</span>
+							{isLoading && (
+								<span className="text-xs text-amber-500 animate-pulse">
+									Loading data...
+								</span>
+							)}
 						</CardHeader>
 						<CardContent
 							className="p-0 divide-y"
 							style={{ borderColor: "var(--border)" }}
 						>
-							{todos.map((todo) => (
+							{todos.length === 0 ? (
 								<div
-									key={todo.id}
-									className={`group p-4 flex items-start justify-between transition ${
-										todo.status === "COMPLETED" ? "opacity-60" : ""
-									}`}
-									style={{ borderColor: "var(--border)" }}
+									className="p-8 text-center text-xs"
+									style={{ color: "var(--text-secondary)" }}
 								>
-									<div className="flex items-start gap-3.5 flex-1 min-w-0">
-										<Button
-											className="mt-0.5 cursor-grab"
-											style={{ color: "var(--text-secondary)" }}
-										>
-											<GripVertical className="w-4 h-4" />
-										</Button>
-
-										<Button
-											onClick={() => toggleComplete(todo.id)}
-											className="mt-0.5"
-										>
-											{todo.status === "COMPLETED" ? (
-												<CheckCircle2 className="w-5 h-5 text-emerald-500" />
-											) : (
-												<Circle
-													className="w-5 h-5 transition"
-													style={{ color: "var(--text-secondary)" }}
-												/>
-											)}
-										</Button>
-
-										<div className="space-y-1.5 flex-1 pr-4">
-											<div className="flex items-center gap-2">
-												{todo.isPinned && (
-													<Pin className="w-3.5 h-3.5 text-amber-500 rotate-45" />
-												)}
-												<h4
-													className={`font-medium text-sm ${
-														todo.status === "COMPLETED" ? "line-through" : ""
-													}`}
-													style={{
-														color:
-															todo.status === "COMPLETED"
-																? "var(--text-secondary)"
-																: "var(--text)",
-													}}
-												>
-													{todo.title}
-												</h4>
-											</div>
-
-											{todo.description && (
-												<p
-													className="text-xs line-clamp-1"
-													style={{ color: "var(--text-secondary)" }}
-												>
-													{todo.description}
-												</p>
-											)}
-
-											{/* Meta Information */}
-											<div
-												className="flex items-center gap-3 pt-1 text-xs"
+									No tasks found.
+								</div>
+							) : (
+								todos.map((todo) => (
+									<div
+										key={todo.id}
+										className={`group p-4 flex items-start justify-between transition ${
+											todo.status === "COMPLETED" ? "opacity-60" : ""
+										}`}
+										style={{ borderColor: "var(--border)" }}
+									>
+										<div className="flex items-start gap-3.5 flex-1 min-w-0">
+											<Button
+												className="mt-0.5 cursor-grab"
 												style={{ color: "var(--text-secondary)" }}
 											>
-												{todo.projectName && (
-													<span
-														className="flex items-center gap-1 font-medium"
-														style={{ color: "var(--text)" }}
+												<GripVertical className="w-4 h-4" />
+											</Button>
+
+											<Button className="mt-0.5">
+												{todo.status === "COMPLETED" ? (
+													<CheckCircle2 className="w-5 h-5 text-emerald-500" />
+												) : (
+													<Circle
+														className="w-5 h-5 transition"
+														style={{ color: "var(--text-secondary)" }}
+													/>
+												)}
+											</Button>
+
+											<div className="space-y-1.5 flex-1 pr-4">
+												<div className="flex items-center gap-2">
+													{todo.isPinned && (
+														<Pin className="w-3.5 h-3.5 text-amber-500 rotate-45" />
+													)}
+													<h4
+														className={`font-medium text-sm ${
+															todo.status === "COMPLETED" ? "line-through" : ""
+														}`}
+														style={{
+															color:
+																todo.status === "COMPLETED"
+																	? "var(--text-secondary)"
+																	: "var(--text)",
+														}}
 													>
-														<Folder
-															className="w-3 h-3"
-															style={{ color: "var(--link)" }}
-														/>
-														{todo.projectName}
-													</span>
+														{todo.title}
+													</h4>
+												</div>
+
+												{todo.description && (
+													<p
+														className="text-xs line-clamp-1"
+														style={{ color: "var(--text-secondary)" }}
+													>
+														{todo.description}
+													</p>
 												)}
 
-												{todo.dueDate && (
-													<span className="flex items-center gap-1">
-														<CalendarIcon className="w-3 h-3" />
-														{new Date(todo.dueDate).toLocaleDateString(
-															"en-US",
-															{ month: "short", day: "numeric" },
-														)}
-													</span>
-												)}
+												<div
+													className="flex items-center gap-3 pt-1 text-xs"
+													style={{ color: "var(--text-secondary)" }}
+												>
+													{todo.projectName && (
+														<span
+															className="flex items-center gap-1 font-medium"
+															style={{ color: "var(--text)" }}
+														>
+															<Folder
+																className="w-3 h-3"
+																style={{ color: "var(--link)" }}
+															/>
+															{todo.projectName}
+														</span>
+													)}
 
-												{todo.subtaskCount > 0 && (
-													<span className="flex items-center gap-1">
-														<ChevronRight className="w-3 h-3" />
-														{todo.subtaskCount} Subtasks
-													</span>
-												)}
+													{todo.dueDate && (
+														<span className="flex items-center gap-1">
+															<CalendarIcon className="w-3 h-3" />
+															{new Date(todo.dueDate).toLocaleDateString(
+																"en-US",
+																{ month: "short", day: "numeric" },
+															)}
+														</span>
+													)}
 
-												{todo.attachmentsCount > 0 && (
-													<span className="flex items-center gap-1">
-														<Paperclip className="w-3 h-3" />
-														{todo.attachmentsCount}
-													</span>
-												)}
+													{todo.subtaskCount > 0 && (
+														<span className="flex items-center gap-1">
+															<ChevronRight className="w-3 h-3" />
+															{todo.subtaskCount} Subtasks
+														</span>
+													)}
+
+													{todo.attachmentsCount > 0 && (
+														<span className="flex items-center gap-1">
+															<Paperclip className="w-3 h-3" />
+															{todo.attachmentsCount}
+														</span>
+													)}
+												</div>
 											</div>
 										</div>
-									</div>
 
-									{/* Status & Priority Badges */}
-									<div className="flex items-center gap-3 shrink-0">
-										{todo.tags.map((tag) => (
-											<Badge
-												key={tag}
-												variant="outline"
-												className="hidden sm:inline-block text-[10px]"
-												style={{
-													borderColor: "var(--border)",
-													color: "var(--text-secondary)",
-												}}
-											>
-												{tag}
-											</Badge>
-										))}
+										<div className="flex items-center gap-3 shrink-0">
+											{todo.tags.map((tag) => (
+												<Badge
+													key={tag}
+													variant="outline"
+													className="hidden sm:inline-block text-[10px]"
+													style={{
+														borderColor: "var(--border)",
+														color: "var(--text-secondary)",
+													}}
+												>
+													{tag}
+												</Badge>
+											))}
 
-										<PriorityBadge priority={todo.priority} />
-										<StatusBadge status={todo.status} />
+											<PriorityBadge priority={todo.priority} />
+											<StatusBadge status={todo.status} />
+										</div>
 									</div>
-								</div>
-							))}
+								))
+							)}
 						</CardContent>
+
+						{/* 4. PAGINATION CONTROLS FOOTER */}
+						<CardFooter
+							className="py-3 px-4 border-t flex items-center justify-between text-xs"
+							style={{ borderColor: "var(--border)" }}
+						>
+							<div
+								className="flex items-center gap-2"
+								style={{ color: "var(--text-secondary)" }}
+							>
+								<span>Rows per page</span>
+								<Select
+									value={String(searchParams.limit)}
+									onValueChange={(val) =>
+										updateSearchParams({ limit: Number(val), page: 1 })
+									}
+								>
+									<SelectTrigger
+										className="h-7 w-[70px] text-xs"
+										style={{
+											backgroundColor: "var(--bg)",
+											borderColor: "var(--border)",
+										}}
+									>
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent
+										style={{
+											backgroundColor: "var(--bg-secondary)",
+											borderColor: "var(--border)",
+										}}
+									>
+										<SelectItem value="5">5</SelectItem>
+										<SelectItem value="10">10</SelectItem>
+										<SelectItem value="20">20</SelectItem>
+									</SelectContent>
+								</Select>
+							</div>
+
+							<div className="flex items-center gap-2">
+								<span style={{ color: "var(--text-secondary)" }}>
+									Page {searchParams.page} of {totalPages}
+								</span>
+
+								<div className="flex items-center gap-1">
+									<Button
+										variant="outline"
+										size="icon"
+										className="h-7 w-7"
+										disabled={searchParams.page <= 1 || isPlaceholderData}
+										onClick={() =>
+											updateSearchParams({ page: searchParams.page - 1 })
+										}
+										style={{
+											borderColor: "var(--border)",
+											color: "var(--text)",
+										}}
+									>
+										<ChevronLeft className="w-4 h-4" />
+									</Button>
+
+									<Button
+										variant="outline"
+										size="icon"
+										className="h-7 w-7"
+										disabled={
+											searchParams.page >= totalPages || isPlaceholderData
+										}
+										onClick={() =>
+											updateSearchParams({ page: searchParams.page + 1 })
+										}
+										style={{
+											borderColor: "var(--border)",
+											color: "var(--text)",
+										}}
+									>
+										<ChevronRight className="w-4 h-4" />
+									</Button>
+								</div>
+							</div>
+						</CardFooter>
 					</Card>
 				</div>
 			</main>
 
-			{/* 3. SHADCN DIALOG FOR NEW TASK CREATION */}
+			{/* CREATE TASK DIALOG */}
 			<Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
 				<DialogContent
 					className="sm:max-w-[425px]"
@@ -568,7 +677,7 @@ function TodoDashboard() {
 								Description
 							</Label>
 							<Textarea
-								placeholder="Add details, markdown supported..."
+								placeholder="Add details..."
 								className="mt-1"
 								rows={3}
 								style={{
@@ -577,71 +686,6 @@ function TodoDashboard() {
 									color: "var(--text)",
 								}}
 							/>
-						</div>
-
-						<div className="grid grid-cols-2 gap-4">
-							<div>
-								<Label
-									className="text-xs font-semibold uppercase tracking-wider"
-									style={{ color: "var(--text-secondary)" }}
-								>
-									Priority
-								</Label>
-								<Select defaultValue="MEDIUM">
-									<SelectTrigger
-										className="mt-1"
-										style={{
-											backgroundColor: "var(--bg)",
-											borderColor: "var(--border)",
-										}}
-									>
-										<SelectValue placeholder="Priority" />
-									</SelectTrigger>
-									<SelectContent
-										style={{
-											backgroundColor: "var(--bg-secondary)",
-											borderColor: "var(--border)",
-										}}
-									>
-										<SelectItem value="LOW">Low</SelectItem>
-										<SelectItem value="MEDIUM">Medium</SelectItem>
-										<SelectItem value="HIGH">High</SelectItem>
-										<SelectItem value="URGENT">Urgent</SelectItem>
-									</SelectContent>
-								</Select>
-							</div>
-
-							<div>
-								<Label
-									className="text-xs font-semibold uppercase tracking-wider"
-									style={{ color: "var(--text-secondary)" }}
-								>
-									Project
-								</Label>
-								<Select>
-									<SelectTrigger
-										className="mt-1"
-										style={{
-											backgroundColor: "var(--bg)",
-											borderColor: "var(--border)",
-										}}
-									>
-										<SelectValue placeholder="Select Project" />
-									</SelectTrigger>
-									<SelectContent
-										style={{
-											backgroundColor: "var(--bg-secondary)",
-											borderColor: "var(--border)",
-										}}
-									>
-										{MOCK_PROJECTS.map((p) => (
-											<SelectItem key={p.id} value={p.id}>
-												{p.name}
-											</SelectItem>
-										))}
-									</SelectContent>
-								</Select>
-							</div>
 						</div>
 					</div>
 
@@ -667,18 +711,15 @@ function TodoDashboard() {
 	);
 }
 
-// --- HELPER COMPONENTS ---
-
+// HELPER COMPONENTS
 function SidebarItem({
 	icon,
 	label,
-	count,
 	active,
 	onClick,
 }: {
 	icon: React.ReactNode;
 	label: string;
-	count?: number;
 	active?: boolean;
 	onClick: () => void;
 }) {
@@ -695,18 +736,6 @@ function SidebarItem({
 				{icon}
 				<span>{label}</span>
 			</div>
-			{count !== undefined && (
-				<Badge
-					variant="secondary"
-					className="text-[10px] px-1.5 py-0 h-5"
-					style={{
-						backgroundColor: active ? "rgba(255,255,255,0.2)" : "var(--bg)",
-						color: active ? "#ffffff" : "var(--text-secondary)",
-					}}
-				>
-					{count}
-				</Badge>
-			)}
 		</Button>
 	);
 }

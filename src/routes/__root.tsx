@@ -6,6 +6,7 @@ import {
 	Scripts,
 } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
+import { authClient } from "#/lib/auth-client";
 import TanStackQueryDevtools from "../integrations/tanstack-query/devtools";
 import appCss from "../styles.css?url";
 
@@ -35,6 +36,17 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 		],
 	}),
 	shellComponent: RootDocument,
+	beforeLoad: async () => {
+		try {
+			const response = await authClient.signIn.email({
+				email: "jane@dev.io",
+				password: "123456789",
+			});
+			console.log("Boop", response.data?.user);
+		} catch (e) {
+			console.error("RootDocument Error @", e);
+		}
+	},
 });
 
 function RootDocument({ children }: { children: React.ReactNode }) {
