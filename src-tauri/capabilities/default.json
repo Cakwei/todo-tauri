@@ -18,6 +18,7 @@
         }
       ]
     },
-    "http:default"
+    "http:default",
+    "store:default"
   ]
 }

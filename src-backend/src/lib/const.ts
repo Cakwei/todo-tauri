@@ -6,3 +6,7 @@ export const CORSList = [
 	"http://tauri.localhost",
 	"https://tauri.localhost",
 ];
+
+export const MESSAGE = {
+	SUCCESSFUL_FETCH: "Successfully fetched data",
+};

@@ -2,6 +2,7 @@
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_http::init())
         .setup(|app| {
             // 1. Setup logging for debug mode

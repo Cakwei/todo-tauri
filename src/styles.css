@@ -183,6 +183,10 @@
   --color-sidebar-ring: var(--sidebar-ring);
 }
 
+* {
+  font-family: Lato;
+}
+
 html,
 body,
 #app {
@@ -193,7 +197,6 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--sea-ink);
-  font-family: var(--font-sans);
  /* background-color: var(--bg);*/
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;

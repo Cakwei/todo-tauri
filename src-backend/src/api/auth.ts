@@ -1,7 +1,7 @@
 /** biome-ignore-all lint/suspicious/useIterableCallbackReturn: <explanation> */
 import { fromNodeHeaders } from "better-auth/node";
 import type { FastifyPluginAsync } from "fastify";
-import { auth } from "../../lib/auth";
+import { auth } from "../lib/auth";
 
 export const authRoutes: FastifyPluginAsync = async (fastify) => {
 	fastify.route({
@@ -24,7 +24,8 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
 				return reply.send(response.body ? await response.text() : null);
 			} catch (error) {
 				console.error(error);
-				fastify.log.error("Authentication Error:", error);
+				console.error(error);
+				fastify.log.error("Authentication Error");
 				return reply.status(500).send({
 					error: "Internal authentication error",
 					code: "AUTH_FAILURE",

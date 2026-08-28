@@ -1,10 +1,12 @@
+import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
+import { authRoutes } from "./api/auth";
+import { todoRoutes } from "./api/todos/index";
 import { CORSList } from "./lib/const";
-import { authRoutes } from "./routes/todos/auth";
 
 const PORT = 3001;
-const server = Fastify({ logger: true });
+const server = Fastify(/*{ logger: true }*/);
 process.loadEnvFile();
 
 if (!process.env.BETTER_AUTH_URL) throw Error("BETTER_AUTH_URL is not set");
@@ -18,11 +20,13 @@ await server.register(cors, {
 	maxAge: 86400,
 });
 
-server.register(authRoutes);
+// Cookies
 
-server.get("/", async (request, reply) => {
-	return { hello: "world" };
-});
+await server.register(cookie);
+
+// Imported routes
+await server.register(authRoutes);
+await server.register(todoRoutes, { prefix: "/api/todos" });
 
 try {
 	await server.listen({ port: PORT });
