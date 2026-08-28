@@ -1,15 +1,7 @@
 import { useDebouncedCallback } from "@tanstack/react-pacer";
-import {
-	queryOptions,
-	useMutation,
-	useQuery,
-	useQueryClient,
-} from "@tanstack/react-query";
-import {
-	createFileRoute,
-	useNavigate,
-	useRouteContext,
-} from "@tanstack/react-router";
+import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { invoke } from "@tauri-apps/api/core";
 import { isAxiosError } from "axios";
 import {
 	BarChart3,
@@ -159,6 +151,20 @@ export const Route = createFileRoute("/__routes/__protected/dashboard")({
 	component: Dashboard,
 });
 
+const wifiConnectionQueryOptions = () =>
+	queryOptions({
+		queryKey: ["connection"],
+		queryFn: async () => {
+			const online = await invoke("is_online");
+			if (online) {
+				console.log("Connected to the internet!");
+			} else {
+				console.log("No internet connection.");
+			}
+		},
+		refetchInterval: 5000,
+	});
+
 const fetchTodoQueryOptions = ({
 	page = 1,
 	limit = 10,
@@ -200,23 +206,36 @@ async function fetchTodosApi({
 
 		return response.data || [];
 	} catch (e) {
-		console.error("Error @ fetchTodosApie", e);
+		console.error("Error @ fetchTodosApi", e);
 	}
 }
 
 async function fetchProjectsApi() {
-	const response = await axios.get("/projects");
-	return response.data;
+	try {
+		const response = await axios.get("/projects");
+		console.log("fahh", response.data);
+		return response.data || [];
+	} catch (e) {
+		console.error("fetchProjectsApi", e);
+	}
 }
 
 async function fetchTagsApi() {
-	const response = await axios.get("/tags");
-	return response.data;
+	try {
+		const response = await axios.get("/tags");
+		return response.data || [];
+	} catch (e) {
+		console.error("fetchTagsApi", e);
+	}
 }
 
 async function fetchStatsApi() {
-	const response = await axios.get("/todos/stats");
-	return response.data;
+	try {
+		const response = await axios.get("/todos/stats");
+		return response.data || [];
+	} catch (e) {
+		console.error("fetchStatsApi @", e);
+	}
 }
 
 function Dashboard() {
@@ -235,7 +254,7 @@ function Dashboard() {
 	const searchTodoDebounceFn = useDebouncedCallback(
 		async (query: string) => {
 			console.log("TODO Debounce logging", query);
-			await queryClient.refetchQueries({ queryKey: ["todos"] });
+			// await queryClient.refetchQueries({ queryKey: ["todos"] });
 			updateSearchParams({ search: query });
 		},
 		{
@@ -260,7 +279,10 @@ function Dashboard() {
 		data: todosRes,
 		isLoading,
 		isPlaceholderData,
+		isFetching,
 	} = useQuery(fetchTodoQueryOptions({ page, limit, search, tab, projectId }));
+
+	const _IGNORED_CHECKS_FOR_WIFI = useQuery(wifiConnectionQueryOptions());
 
 	const { data: projectsRes } = useQuery({
 		queryKey: ["projects"],
@@ -320,38 +342,70 @@ function Dashboard() {
 		},
 	});
 
+	// Toggle status functions
 	const toggleStatusMutation = useMutation({
 		mutationFn: async ({ id, status }: { id: string; status: string }) => {
-			const nextStatus = status === "COMPLETED" ? "TODO" : "COMPLETED";
+			try {
+				const nextStatus = status === "COMPLETED" ? "TODO" : "COMPLETED";
 
-			const validated = updateTodoStatusSchema.parse({
-				id,
-				status: nextStatus,
-			});
+				const validated = updateTodoStatusSchema.parse({
+					id,
+					status: nextStatus,
+				});
 
-			const response = await axios.patch(`/todos/${validated.id}`, {
-				status: validated.status,
-			});
+				const response = await axios.patch(`/todos/${validated.id}`, {
+					status: validated.status,
+				});
 
-			return response.data;
+				return response.data;
+			} catch (e) {
+				console.error("toggleStatusMutation @ ", e);
+			}
+		},
+		onMutate: async (updatedTodo) => {
+			// Cancel any outgoing refetches so they don't overwrite our optimistic update
+			await queryClient.cancelQueries({ queryKey: ["todos"] });
+
+			// Snapshot the previous value in case we need to roll back
+			const previousTodos = queryClient.getQueryData<Todo[]>(["todos"]);
+
+			// Optimistically update the cache instantly
+			queryClient.setQueryData(["todos"], (old: Todo[]) =>
+				old?.map((todo) =>
+					todo.id === updatedTodo.id
+						? {
+								...todo,
+								status:
+									updatedTodo.status === "completed" ? "pending" : "completed",
+							}
+						: todo,
+				),
+			);
+
+			// Return a context object with the snapshotted value
+			return { previousTodos };
 		},
 
-		onSuccess: () => {
-			queryClient.invalidateQueries({
-				queryKey: ["todos"],
-			});
-
-			queryClient.invalidateQueries({
-				queryKey: ["todo-stats"],
-			});
+		// 2. If the mutation fails, use the context we returned above to roll back
+		onError: (err, newTodo, context) => {
+			if (context?.previousTodos) {
+				queryClient.setQueryData(["todos"], context.previousTodos);
+			}
 		},
 
-		onError: () => {
-			queryClient.invalidateQueries({
-				queryKey: ["todos"],
-			});
+		// 3. Always refetch or invalidate after success or error to sync with the server
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
 		},
 	});
+
+	const debouncedToggle = useDebouncedCallback(
+		(args: { id: string; status: string }) => {
+			toggleStatusMutation.mutate(args);
+		},
+		{ wait: 150 }, // Time in milliseconds to wait before executing
+	);
+	// ====
 
 	const todos: Todo[] = todosRes?.data ?? [];
 	const projects: Project[] = projectsRes?.data ?? [];
@@ -557,10 +611,7 @@ function Dashboard() {
 								<div className="min-w-0">
 									<div className="flex items-center gap-2">
 										<h1
-											className="
-												truncate
-												text-xl font-bold tracking-tight
-												sm:text-2xl
+											className="truncate text-xl font-bold tracking-tight sm:text-2xl
 											"
 											style={{
 												color: "var(--text)",
@@ -569,18 +620,12 @@ function Dashboard() {
 											{pageTitle}
 										</h1>
 
-										{isLoading && (
+										{isFetching && (
 											<span
-												className="
-													hidden rounded-full
-													bg-amber-500/10
-													px-2 py-0.5
-													text-[10px] font-medium
-													text-amber-500
-													sm:inline-flex
+												className="hidden rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500 sm:inline-flex
 												"
 											>
-												Updating
+												Fetching...
 											</span>
 										)}
 									</div>
@@ -624,7 +669,7 @@ function Dashboard() {
 									mb-5
 									grid grid-cols-2
 									gap-2.5
-									sm:grid-cols-4
+									sm:grid-cols-3
 									sm:gap-3
 								"
 							>
@@ -648,16 +693,18 @@ function Dashboard() {
 									icon={<Clock3 className="h-4 w-4 text-amber-500" />}
 								/>
 
+								{/*
 								<StatCard
 									title="Page"
 									value={`${page}/${totalPages}`}
 									icon={<BarChart3 className="h-4 w-4 text-violet-500" />}
 								/>
+								*/}
 							</div>
 
 							{/* Tasks */}
 							<Card
-								className="overflow-hidden rounded-xl shadow-none"
+								className="overflow-hidden gap-0 rounded-xl shadow-none"
 								style={{
 									backgroundColor: "var(--bg-secondary)",
 									borderColor: "var(--border)",
@@ -702,26 +749,46 @@ function Dashboard() {
 									</div>
 								</CardHeader>
 
-								<CardContent className="p-0">
-									{todos.length === 0 ? (
-										<EmptyState
-											search={Boolean(search)}
-											onCreate={() => setIsCreateOpen(true)}
-										/>
-									) : (
+								<CardContent className="p-0 w-full">
+									{/* 1. Initial Loading State: True only on first load, shows nothing else */}
+									{isLoading && (
+										<Label className="w-full p-5 flex justify-center text-(--text)">
+											Loading...
+										</Label>
+									)}
+
+									{/* 2. Content Container: Only render if we are NOT in the initial hard loading state */}
+									{!isLoading && (
 										<div>
-											{todos.map((todo) => (
-												<TodoRow
-													key={todo.id}
-													todo={todo}
-													onToggle={() =>
-														toggleStatusMutation.mutate({
-															id: todo.id,
-															status: todo.status,
-														})
-													}
+											{/* 3. Empty State: Only shows if the array is empty AND we aren't waiting for the initial load */}
+											{todos.length === 0 ? (
+												<EmptyState
+													search={Boolean(search)}
+													onCreate={() => setIsCreateOpen(true)}
 												/>
-											))}
+											) : (
+												/* 4. Active List: Shows the cached todos instantly, even if a background refetch is running */
+												<div>
+													{todos.map((todo) => (
+														<TodoRow
+															key={todo.id}
+															todo={todo}
+															onToggle={() =>
+																debouncedToggle({
+																	id: todo.id,
+																	status: todo.status,
+																})
+															}
+														/>
+													))}
+												</div>
+											)}
+
+											{/*isFetching && !isLoading && (
+												<span className="text-xs text-gray-400">
+													Updating list...
+												</span>
+											)*/}
 										</div>
 									)}
 								</CardContent>
@@ -836,7 +903,7 @@ function SidebarContent({
 						className="
 							flex h-9 w-9 shrink-0
 							items-center justify-center
-							rounded-xl
+							rounded-full
 							text-sm font-bold text-white
 							shadow-sm
 						"
@@ -854,7 +921,7 @@ function SidebarContent({
 								color: "var(--text)",
 							}}
 						>
-							TaskSpace
+							Cakwei's TODO
 						</p>
 
 						<p
@@ -1114,23 +1181,17 @@ function SidebarItem({
 	onClick: () => void;
 }) {
 	return (
-		<button
-			type="button"
+		<Button
 			onClick={onClick}
-			className="
-				flex w-full items-center gap-2.5
-				rounded-lg px-2.5 py-2
-				text-left text-xs font-medium
-				transition-colors
-			"
+			className="w-full bg-(--bg-secondary) hover:bg-(--bg) gap-2.5 rounded-md px-2.5 py-2 text-left text-xs transition-colors flex-none justify-start"
 			style={{
-				backgroundColor: active ? "var(--link)" : "transparent",
+				backgroundColor: active ? "var(--link)" : "",
 				color: active ? "#ffffff" : "var(--text)",
 			}}
 		>
 			<span className={iconClassName}>{icon}</span>
 			<span>{label}</span>
-		</button>
+		</Button>
 	);
 }
 
@@ -1143,12 +1204,7 @@ function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
 
 	return (
 		<div
-			className={`
-				group relative
-				border-b last:border-b-0
-				px-3 py-3.5
-				transition-colors
-				sm:px-5 sm:py-4
+			className={`py-3.5 group relative border-b last:border-b-0 px-3  transition-colors sm:px-5
 				${completed ? "opacity-60" : ""}
 			`}
 			style={{
@@ -1203,11 +1259,7 @@ function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
 						)}
 
 						<h3
-							className={`
-								min-w-0 flex-1
-								text-sm font-medium
-								leading-5
-								sm:text-[13px]
+							className={`min-w-0 flex-1 text-sm font-medium leading-5 sm:text-sm
 								${completed ? "line-through" : ""}
 							`}
 							style={{
@@ -1220,10 +1272,7 @@ function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
 
 					{todo.description && (
 						<p
-							className="
-								mt-1 line-clamp-1
-								text-xs leading-5
-							"
+							className="mt-1 line-clamp-1 text-sm"
 							style={{
 								color: "var(--text-secondary)",
 							}}
@@ -1236,11 +1285,7 @@ function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
 					<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
 						{todo.project?.name && (
 							<span
-								className="
-									flex min-w-0 max-w-[180px]
-									items-center gap-1
-									text-[10px] font-medium
-								"
+								className="flex min-w-0 max-w-[180px] items-center gap-1 text-[10px] font-medium"
 								style={{
 									color: "var(--text-secondary)",
 								}}
@@ -1350,11 +1395,7 @@ function StatCard({
 			<CardContent className="p-3 sm:p-4">
 				<div className="flex items-center justify-between gap-2">
 					<span
-						className="
-							truncate
-							text-[10px] font-medium
-							uppercase tracking-wide
-							sm:text-[11px]
+						className="truncate text-[10px] font-medium uppercase tracking-wide sm:text-[11px]
 						"
 						style={{
 							color: "var(--text-secondary)",
@@ -1423,10 +1464,7 @@ function PriorityBadge({ priority }: { priority: Todo["priority"] }) {
 
 	return (
 		<span
-			className="
-				inline-flex items-center
-				rounded-md px-1.5 py-0.5
-				text-[9px] font-semibold
+			className="px-2.5 items-center rounded-md py-0.5 text-[9px] font-semibold
 			"
 			style={{
 				color: style.color,
@@ -1450,10 +1488,7 @@ function StatusBadge({ status }: { status: Todo["status"] }) {
 
 	return (
 		<span
-			className="
-				inline-flex items-center
-				rounded-md px-1.5 py-0.5
-				text-[9px] font-medium
+			className="px-2.5 items-center rounded-md py-0.5 text-[9px] font-medium
 			"
 			style={{
 				color: status === "COMPLETED" ? "#10b981" : "var(--text-secondary)",
@@ -1470,11 +1505,7 @@ function TagBadge({ name }: { name?: string }) {
 
 	return (
 		<span
-			className="
-				inline-flex max-w-[100px]
-				truncate rounded-md
-				border px-1.5 py-0.5
-				text-[9px]
+			className="px-2.5 truncate rounded-md border py-0.5 text-[9px]
 			"
 			style={{
 				borderColor: "var(--border)",
@@ -1603,10 +1634,7 @@ function CreateTaskDialog({
 		>
 			<DialogContent
 				className="
-					w-[calc(100vw-24px)]
-					max-w-[480px]
-					rounded-2xl
-					border
+					w-[calc(100vw-24px)] max-w-[480px] rounded-2xl border
 				"
 				style={{
 					backgroundColor: "var(--bg-secondary)",

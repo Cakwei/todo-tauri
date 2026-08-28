@@ -16,17 +16,17 @@ export const Route = createFileRoute("/__routes/")({
 	component: LaunchScreen,
 	beforeLoad: async ({ location }) => {
 		try {
-			// 1. Fetch Session
+			// Fetch Session
 			const session = (await authClient.getSession()).data;
-			const appDataPath = await appDataDir();
+			// const appDataPath = await appDataDir();
 
 			// console.log("/boom", appDataPath);
 
-			// 2. Read from Tauri Store
+			// Reads from Tauri Store
 			const store = await Store.load("app-settings.json");
 			const isFirstTime = (await store.get<boolean>("isFirstTime")) ?? true;
 
-			// 3. Redirect returning users to dashboard if not already there
+			// 3Redirect returning users to dashboard if not already there
 			if (!isFirstTime && !location.pathname.startsWith("/dashboard")) {
 				throw redirect({
 					to: "/dashboard",

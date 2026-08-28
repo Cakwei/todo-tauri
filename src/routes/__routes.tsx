@@ -1,7 +1,6 @@
 import { createFileRoute, Outlet } from "@tanstack/react-router";
 import { PendingComponent } from "#/components/ui/loading-component";
 import { authClient } from "#/lib/auth-client";
-
 export const Route = createFileRoute("/__routes")({
 	beforeLoad: async () => {
 		try {

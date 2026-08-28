@@ -2,46 +2,7 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { prisma } from "../../db";
-import { auth } from "../../lib/auth";
-
-// -----------------------------------------------------------------------
-// AUTH GUARD
-// -----------------------------------------------------------------------
-// Identity comes ONLY from the verified better-auth session cookie.
-// There is no client-supplied userId anywhere in this file — the request
-// body never contains one (see schemas below), so there is nothing to
-// cross-check it against. request.user is the single source of truth.
-declare module "fastify" {
-	interface FastifyRequest {
-		user?: { id: string };
-	}
-}
-
-async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
-	/* const headers = new Headers();
-	for (const [key, value] of Object.entries(request.headers)) {
-		if (typeof value === "string") headers.append(key, value);
-		else if (Array.isArray(value)) value.forEach((v) => headers.append(key, v));
-	}*/
-
-	const betterAuthCookie = request.cookies["better-auth.session_token"];
-	const cookie = `better-auth.session_token=${betterAuthCookie}`;
-
-	if (!cookie)
-		return reply.status(401).send({ success: false, message: "Unauthorized" });
-
-	const session = await auth.api.getSession({
-		headers: {
-			cookie: cookie,
-		},
-	});
-	// console.log("testing", cookie, session);
-	if (!session?.user?.id) {
-		return reply.status(401).send({ success: false, message: "Unauthorized" });
-	}
-
-	request.user = { id: session.user.id };
-}
+import { requireAuth } from "../../lib/utils";
 
 function assertBodyUserIdMatchesSession(
 	request: FastifyRequest,
@@ -58,9 +19,7 @@ function assertBodyUserIdMatchesSession(
 	}
 }
 
-// -----------------------------------------------------------------------
-// ZOD VALIDATION SCHEMAS
-// -----------------------------------------------------------------------
+// Zod schemas
 const getTodosQuerySchema = z.object({
 	page: z.coerce.number().int().min(1).default(1),
 	limit: z.coerce.number().int().min(1).max(100).default(10),
@@ -115,6 +74,8 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 
 		const { page, limit, search, status, projectId } = queryResult.data;
 		const skip = (page - 1) * limit;
+
+		console.log(queryResult.data);
 
 		// Always scope to the authenticated user — this is the fix for the
 		// IDOR that let anyone list/read every user's todos.
@@ -274,7 +235,7 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 			return reply.status(400).send({
 				success: false,
 				error: "Invalid route parameter",
-				details: paramResult.error.flatten().fieldErrors,
+				details: z.flattenError(paramResult.error),
 			});
 		}
 

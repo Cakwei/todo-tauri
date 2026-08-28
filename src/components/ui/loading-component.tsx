@@ -54,7 +54,7 @@ export function PendingComponent() {
 					Loading...
 				</h3>
 				<p className="text-xs" style={{ color: "var(--text-secondary)" }}>
-					Syncing application state
+					Please wait a moment while UI is fetched
 				</p>
 			</div>
 		</div>
