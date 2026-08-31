@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
@@ -11,7 +12,9 @@ import { CORSList } from "./lib/const";
 
 const PORT = 3001;
 const server = Fastify(/*{ logger: true }*/);
-process.loadEnvFile();
+if (existsSync(".env")) {
+	process.loadEnvFile();
+}
 
 if (!process.env.BETTER_AUTH_URL)
 	throw Error("BETTER_AUTH_URL is not set as environment variable");

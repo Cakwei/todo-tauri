@@ -1,7 +1,11 @@
+import { existsSync } from "node:fs";
 import { PrismaMariaDb } from "@prisma/adapter-mariadb";
 import { PrismaClient } from "./generated/prisma/client";
 
-process.loadEnvFile();
+if (existsSync(".env")) {
+	process.loadEnvFile();
+}
+
 const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {
