@@ -51,6 +51,9 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Better Auth configuration
+          BETTER_AUTH_URL: ${{ secrets.BETTER_AUTH_URL }}
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
         with:
           tagName: app-v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
           releaseName: "App v__VERSION__"
