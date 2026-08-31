@@ -20,7 +20,6 @@ function assertBodyUserIdMatchesSession(
 }
 
 // Zod schemas
-// Zod schemas
 const getTodosQuerySchema = z.object({
 	page: z.coerce.number().int().min(1).default(1),
 	limit: z.coerce.number().int().min(1).max(100).default(10),
@@ -73,9 +72,6 @@ const updateTodoSchema = z.object({
 	isPinned: z.boolean().optional(),
 });
 
-// -----------------------------------------------------------------------
-// FASTIFY ROUTE PLUGIN
-// -----------------------------------------------------------------------
 export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 	// Require auth for every route in this plugin.
 	fastify.addHook("preHandler", requireAuth);
@@ -86,339 +82,441 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 	});
 
 	// Handles reordering by DnD in client
-	fastify.post("/reorder", async (request, reply) => {
-		const bodyResult = reorderTodosSchema.safeParse(request.body);
-		if (!bodyResult.success) {
-			return reply.status(400).send({
-				success: false,
-				error: "Invalid request payload",
-				details: bodyResult.error.flatten().fieldErrors,
-			});
-		}
-
-		const { orderedIds } = bodyResult.data;
-		const userId = request.user!.id;
-
-		try {
-			const owned = await prisma.todo.findMany({
-				where: { id: { in: orderedIds }, userId, deletedAt: null },
-				select: { id: true },
-			});
-
-			if (owned.length !== orderedIds.length) {
-				return reply.status(403).send({
+	fastify.post(
+		"/reorder",
+		{
+			config: {
+				rateLimit: {
+					max: 30,
+					timeWindow: "1 minute",
+					keyGenerator: (request) => {
+						const userId = request.user?.id ?? "anonymous";
+						const clientIp = request.ip;
+						return `reorder-todos:${userId}:${clientIp}`;
+					},
+				},
+			},
+		},
+		async (request, reply) => {
+			const bodyResult = reorderTodosSchema.safeParse(request.body);
+			if (!bodyResult.success) {
+				return reply.status(400).send({
 					success: false,
-					message: "One or more todos were not found or are not yours",
+					error: "Invalid request payload",
+					details: bodyResult.error.flatten().fieldErrors,
 				});
 			}
 
-			// Single atomic transaction — either the whole new order lands, or none of it does.
-			await prisma.$transaction(
-				orderedIds.map((id, index) =>
-					prisma.todo.update({
-						where: { id },
-						data: { reorderIndex: index },
-					}),
-				),
-			);
+			const { orderedIds } = bodyResult.data;
+			const userId = request.user!.id;
 
-			return reply.send({ success: true });
-		} catch (error) {
-			request.log.error(error, "Failed to reorder todos");
-			return reply
-				.status(500)
-				.send({ success: false, message: "Failed to reorder todos" });
-		}
-	});
+			try {
+				const owned = await prisma.todo.findMany({
+					where: { id: { in: orderedIds }, userId, deletedAt: null },
+					select: { id: true },
+				});
+
+				if (owned.length !== orderedIds.length) {
+					return reply.status(403).send({
+						success: false,
+						message: "One or more todos were not found or are not yours",
+					});
+				}
+
+				// Single atomic transaction — either the whole new order lands, or none of it does.
+				await prisma.$transaction(
+					orderedIds.map((id, index) =>
+						prisma.todo.update({
+							where: { id },
+							data: { reorderIndex: index },
+						}),
+					),
+				);
+
+				return reply.send({ success: true });
+			} catch (error) {
+				request.log.error(error, "Failed to reorder todos");
+				return reply
+					.status(500)
+					.send({ success: false, message: "Failed to reorder todos" });
+			}
+		},
+	);
 
 	// GET /api/todos - Paginated & Searchable List (own todos only)
-	fastify.get("/", async (request, reply) => {
-		const queryResult = getTodosQuerySchema.safeParse(request.query);
-		// console.log("hello");
-		if (!queryResult.success) {
-			return reply.status(400).send({
-				success: false,
-				error: "Invalid query parameters",
-				details: z.flattenError(queryResult.error),
-			});
-		}
+	fastify.get(
+		"/",
+		{
+			config: {
+				rateLimit: {
+					max: 60,
+					timeWindow: "1 minute",
+					keyGenerator: (request) => {
+						const userId = request.user?.id ?? "anonymous";
+						const clientIp = request.ip;
+						return `get-todos:${userId}:${clientIp}`;
+					},
+				},
+			},
+		},
+		async (request, reply) => {
+			const queryResult = getTodosQuerySchema.safeParse(request.query);
+			if (!queryResult.success) {
+				return reply.status(400).send({
+					success: false,
+					error: "Invalid query parameters",
+					details: z.flattenError(queryResult.error),
+				});
+			}
 
-		const { page, limit, search, status, projectId } = queryResult.data;
-		const skip = (page - 1) * limit;
+			const { page, limit, search, status, projectId } = queryResult.data;
+			const skip = (page - 1) * limit;
 
-		console.log(queryResult.data);
+			const whereCondition: any = {
+				deletedAt: null,
+				userId: request.user?.id,
+			};
 
-		// Always scope to the authenticated user — this is the fix for the
-		// IDOR that let anyone list/read every user's todos.
-		const whereCondition: any = {
-			deletedAt: null,
-			userId: request.user?.id,
-		};
+			if (search) {
+				whereCondition.OR = [
+					{ title: { contains: search, mode: "insensitive" } },
+					{ description: { contains: search, mode: "insensitive" } },
+				];
+			}
+			if (status) whereCondition.status = status;
+			if (projectId) whereCondition.projectId = projectId;
 
-		if (search) {
-			whereCondition.OR = [
-				{ title: { contains: search, mode: "insensitive" } },
-				{ description: { contains: search, mode: "insensitive" } },
-			];
-		}
-		if (status) whereCondition.status = status;
-		if (projectId) whereCondition.projectId = projectId;
+			try {
+				const [todos, totalCount] = await Promise.all([
+					prisma.todo.findMany({
+						where: whereCondition,
+						skip,
+						take: limit,
+						orderBy: { createdAt: "desc" },
+						include: { project: true, tags: { include: { tag: true } } },
+					}),
+					prisma.todo.count({ where: whereCondition }),
+				]);
 
-		try {
-			const [todos, totalCount] = await Promise.all([
-				prisma.todo.findMany({
-					where: whereCondition,
-					skip,
-					take: limit,
-					orderBy: { createdAt: "desc" },
-					include: { project: true, tags: { include: { tag: true } } },
-				}),
-				prisma.todo.count({ where: whereCondition }),
-			]);
-
-			return reply.send({
-				success: true,
-				data: todos,
-				message: "Fetched todos",
-				currentPage: page,
-				totalCount,
-				totalPages: Math.ceil(totalCount / limit) || 1,
-			});
-		} catch (error) {
-			request.log.error(error, "Failed to list todos");
-			return reply.status(500).send({ success: false, data: [] });
-		}
-	});
+				return reply.send({
+					success: true,
+					data: todos,
+					message: "Fetched todos",
+					currentPage: page,
+					totalCount,
+					totalPages: Math.ceil(totalCount / limit) || 1,
+				});
+			} catch (error) {
+				request.log.error(error, "Failed to list todos");
+				return reply.status(500).send({ success: false, data: [] });
+			}
+		},
+	);
 
 	// GET /api/todos/stats - Metrics (own todos only)
-	fastify.get("/stats", async (request, reply) => {
-		const userId = request.user?.id;
-		try {
-			const [total, completed, aggregateTime] = await Promise.all([
-				prisma.todo.count({ where: { deletedAt: null, userId } }),
-				prisma.todo.count({
-					where: { deletedAt: null, userId, status: "COMPLETED" },
-				}),
-				prisma.todo.aggregate({
-					where: { deletedAt: null, userId, status: { not: "COMPLETED" } },
-					_sum: { estimatedMinutes: true },
-				}),
-			]);
-
-			return reply.send({
-				success: true,
-				data: {
-					total,
-					completed,
-					completionRate: total > 0 ? Math.round((completed / total) * 100) : 0,
-					remainingMinutes: aggregateTime._sum.estimatedMinutes || 0,
+	fastify.get(
+		"/stats",
+		{
+			config: {
+				rateLimit: {
+					max: 30,
+					timeWindow: "1 minute",
+					keyGenerator: (request) => {
+						const userId = request.user?.id ?? "anonymous";
+						const clientIp = request.ip;
+						return `get-todo-stats:${userId}:${clientIp}`;
+					},
 				},
-			});
-		} catch (error) {
-			request.log.error(error, "Failed to compute todo stats");
-			return reply.status(500).send({ success: false, data: null });
-		}
-	});
+			},
+		},
+		async (request, reply) => {
+			const userId = request.user?.id;
+			try {
+				const [total, completed, aggregateTime] = await Promise.all([
+					prisma.todo.count({ where: { deletedAt: null, userId } }),
+					prisma.todo.count({
+						where: { deletedAt: null, userId, status: "COMPLETED" },
+					}),
+					prisma.todo.aggregate({
+						where: { deletedAt: null, userId, status: { not: "COMPLETED" } },
+						_sum: { estimatedMinutes: true },
+					}),
+				]);
+
+				return reply.send({
+					success: true,
+					data: {
+						total,
+						completed,
+						completionRate:
+							total > 0 ? Math.round((completed / total) * 100) : 0,
+						remainingMinutes: aggregateTime._sum.estimatedMinutes || 0,
+					},
+				});
+			} catch (error) {
+				request.log.error(error, "Failed to compute todo stats");
+				return reply.status(500).send({ success: false, data: null });
+			}
+		},
+	);
 
 	// GET /api/todos/:id - Single Item (must belong to requester)
-	fastify.get("/:id", async (request, reply) => {
-		const paramResult = todoIdParamSchema.safeParse(request.params);
-		if (!paramResult.success) {
-			return reply.status(400).send({
-				success: false,
-				error: "Invalid route parameter",
-				details: paramResult.error.flatten().fieldErrors,
-			});
-		}
+	fastify.get(
+		"/:id",
+		{
+			config: {
+				rateLimit: {
+					max: 60,
+					timeWindow: "1 minute",
+					keyGenerator: (request) => {
+						const userId = request.user?.id ?? "anonymous";
+						const clientIp = request.ip;
+						return `get-todo-by-id:${userId}:${clientIp}`;
+					},
+				},
+			},
+		},
+		async (request, reply) => {
+			const paramResult = todoIdParamSchema.safeParse(request.params);
+			if (!paramResult.success) {
+				return reply.status(400).send({
+					success: false,
+					error: "Invalid route parameter",
+					details: paramResult.error.flatten().fieldErrors,
+				});
+			}
 
-		const { id } = paramResult.data;
-		const todo = await prisma.todo.findFirst({
-			where: { id, userId: request.user?.id, deletedAt: null },
-		});
-		if (!todo) {
-			// Same 404 whether the id doesn't exist or belongs to someone else —
-			// don't leak which one it is.
-			return reply.status(404).send({ success: false, message: "Not found" });
-		}
-		return reply.send({ success: true, data: todo });
-	});
+			const { id } = paramResult.data;
+			const todo = await prisma.todo.findFirst({
+				where: { id, userId: request.user?.id, deletedAt: null },
+			});
+			if (!todo) {
+				return reply.status(404).send({ success: false, message: "Not found" });
+			}
+			return reply.send({ success: true, data: todo });
+		},
+	);
 
 	// POST /api/todos - Create (owner is always the authenticated user)
-	fastify.post("/", async (request, reply) => {
-		const bodyResult = createTodoSchema.safeParse(request.body);
-		if (!bodyResult.success) {
-			return reply.status(400).send({
-				success: false,
-				error: "Invalid request payload",
-				details: z.flattenError(bodyResult.error),
-			});
-		}
-
-		const mismatch = assertBodyUserIdMatchesSession(request, reply);
-		if (mismatch) return mismatch;
-
-		const userId = request.user?.id || "";
-		const { projectId, parentId, ...rest } = bodyResult.data;
-
-		try {
-			// If a projectId was supplied, verify ownership
-			if (projectId) {
-				const project = await prisma.project.findFirst({
-					where: { id: projectId, userId },
-				});
-				if (!project) {
-					return reply
-						.status(403)
-						.send({ success: false, message: "Invalid project" });
-				}
-			}
-
-			// If a parentId was supplied, verify ownership
-			if (parentId) {
-				const parent = await prisma.todo.findFirst({
-					where: { id: parentId, userId, deletedAt: null },
-				});
-
-				if (!parent) {
-					return reply
-						.status(403)
-						.send({ success: false, message: "Invalid parent todo" });
-				}
-			}
-
-			const newTodo = await prisma.todo.create({
-				data: { ...rest, projectId, parentId, userId },
-			});
-
-			return reply.status(201).send({ success: true, data: newTodo });
-		} catch (error) {
-			request.log.error(error, "Failed to create todo");
-			return reply
-				.status(500)
-				.send({ success: false, message: "Failed to create todo" });
-		}
-	});
-
-	// PATCH /api/todos/:id - Partial Update (must belong to requester)
-	// PATCH /api/todos/:id - Partial Update (must belong to requester)
-	fastify.patch("/:id", async (request, reply) => {
-		const paramResult = todoIdParamSchema.safeParse(request.params);
-		if (!paramResult.success) {
-			return reply.status(400).send({
-				success: false,
-				error: "Invalid route parameter",
-				details: z.flattenError(paramResult.error),
-			});
-		}
-
-		const bodyResult = updateTodoSchema.safeParse(request.body);
-		if (!bodyResult.success) {
-			return reply.status(400).send({
-				success: false,
-				error: "Invalid request payload",
-				details: bodyResult.error.flatten().fieldErrors,
-			});
-		}
-
-		const { id } = paramResult.data;
-		const userId = request.user!.id;
-		const bodyData = bodyResult.data;
-
-		const mismatch = assertBodyUserIdMatchesSession(request, reply);
-		if (mismatch) return mismatch;
-
-		try {
-			// Fetch the existing todo first to preserve properties (like priority) if they aren't explicitly passed
-			const existingTodo = await prisma.todo.findFirst({
-				where: { id, userId, deletedAt: null },
-			});
-
-			if (!existingTodo) {
-				return reply.status(404).send({ success: false, message: "Not found" });
-			}
-
-			// Determine correct completedAt timestamp behavior
-			let completedAt = existingTodo.completedAt;
-			if (bodyData.status) {
-				if (
-					bodyData.status === "COMPLETED" &&
-					existingTodo.status !== "COMPLETED"
-				) {
-					completedAt = new Date();
-				} else if (bodyData.status !== "COMPLETED") {
-					completedAt = null;
-				}
-			}
-
-			console.log("hello", bodyData.priority);
-
-			// Perform the update while explicitly retaining existing properties if not provided in bodyData
-			const updated = await prisma.todo.update({
-				where: { id },
-				data: {
-					title: bodyData.title ?? existingTodo.title,
-					description:
-						bodyData.description !== undefined
-							? bodyData.description
-							: existingTodo.description,
-					status: bodyData.status ?? existingTodo.status,
-					priority: bodyData.priority ?? existingTodo.priority, // Preserves existing priority instead of overriding
-					reorderIndex: bodyData.reorderIndex ?? existingTodo.reorderIndex,
-					isPinned: bodyData.isPinned ?? existingTodo.isPinned,
-					dueDate:
-						bodyData.dueDate !== undefined
-							? bodyData.dueDate
-							: existingTodo.dueDate,
-					reminderAt:
-						bodyData.reminderAt !== undefined
-							? bodyData.reminderAt
-							: existingTodo.reminderAt,
-					estimatedMinutes:
-						bodyData.estimatedMinutes !== undefined
-							? bodyData.estimatedMinutes
-							: existingTodo.estimatedMinutes,
-					completedAt,
+	fastify.post(
+		"/",
+		{
+			config: {
+				rateLimit: {
+					max: 20,
+					timeWindow: "1 minute",
+					keyGenerator: (request) => {
+						const userId = request.user?.id ?? "anonymous";
+						const clientIp = request.ip;
+						return `create-todo:${userId}:${clientIp}`;
+					},
 				},
-			});
+			},
+		},
+		async (request, reply) => {
+			const bodyResult = createTodoSchema.safeParse(request.body);
+			if (!bodyResult.success) {
+				return reply.status(400).send({
+					success: false,
+					error: "Invalid request payload",
+					details: z.flattenError(bodyResult.error),
+				});
+			}
 
-			return reply.send({ success: true, data: updated });
-		} catch (error) {
-			request.log.error(error, "Failed to update todo");
-			return reply
-				.status(500)
-				.send({ success: false, message: "Failed to update todo" });
-		}
-	});
+			const mismatch = assertBodyUserIdMatchesSession(request, reply);
+			if (mismatch) return mismatch;
+
+			const userId = request.user?.id || "";
+			const { projectId, parentId, ...rest } = bodyResult.data;
+
+			try {
+				if (projectId) {
+					const project = await prisma.project.findFirst({
+						where: { id: projectId, userId },
+					});
+					if (!project) {
+						return reply
+							.status(403)
+							.send({ success: false, message: "Invalid project" });
+					}
+				}
+
+				if (parentId) {
+					const parent = await prisma.todo.findFirst({
+						where: { id: parentId, userId, deletedAt: null },
+					});
+
+					if (!parent) {
+						return reply
+							.status(403)
+							.send({ success: false, message: "Invalid parent todo" });
+					}
+				}
+
+				const newTodo = await prisma.todo.create({
+					data: { ...rest, projectId, parentId, userId },
+				});
+
+				return reply.status(201).send({ success: true, data: newTodo });
+			} catch (error) {
+				request.log.error(error, "Failed to create todo");
+				return reply
+					.status(500)
+					.send({ success: false, message: "Failed to create todo" });
+			}
+		},
+	);
+
+	// PATCH /api/todos/:id - Partial Update (must belong to requester)
+	fastify.patch(
+		"/:id",
+		{
+			config: {
+				rateLimit: {
+					max: 30,
+					timeWindow: "1 minute",
+					keyGenerator: (request) => {
+						const userId = request.user?.id ?? "anonymous";
+						const clientIp = request.ip;
+						return `update-todo:${userId}:${clientIp}`;
+					},
+				},
+			},
+		},
+		async (request, reply) => {
+			const paramResult = todoIdParamSchema.safeParse(request.params);
+			if (!paramResult.success) {
+				return reply.status(400).send({
+					success: false,
+					error: "Invalid route parameter",
+					details: z.flattenError(paramResult.error),
+				});
+			}
+
+			const bodyResult = updateTodoSchema.safeParse(request.body);
+			if (!bodyResult.success) {
+				return reply.status(400).send({
+					success: false,
+					error: "Invalid request payload",
+					details: bodyResult.error.flatten().fieldErrors,
+				});
+			}
+
+			const { id } = paramResult.data;
+			const userId = request.user!.id;
+			const bodyData = bodyResult.data;
+
+			const mismatch = assertBodyUserIdMatchesSession(request, reply);
+			if (mismatch) return mismatch;
+
+			try {
+				const existingTodo = await prisma.todo.findFirst({
+					where: { id, userId, deletedAt: null },
+				});
+
+				if (!existingTodo) {
+					return reply
+						.status(404)
+						.send({ success: false, message: "Not found" });
+				}
+
+				let completedAt = existingTodo.completedAt;
+				if (bodyData.status) {
+					if (
+						bodyData.status === "COMPLETED" &&
+						existingTodo.status !== "COMPLETED"
+					) {
+						completedAt = new Date();
+					} else if (bodyData.status !== "COMPLETED") {
+						completedAt = null;
+					}
+				}
+
+				const updated = await prisma.todo.update({
+					where: { id },
+					data: {
+						title: bodyData.title ?? existingTodo.title,
+						description:
+							bodyData.description !== undefined
+								? bodyData.description
+								: existingTodo.description,
+						status: bodyData.status ?? existingTodo.status,
+						priority: bodyData.priority ?? existingTodo.priority,
+						reorderIndex: bodyData.reorderIndex ?? existingTodo.reorderIndex,
+						isPinned: bodyData.isPinned ?? existingTodo.isPinned,
+						dueDate:
+							bodyData.dueDate !== undefined
+								? bodyData.dueDate
+								: existingTodo.dueDate,
+						reminderAt:
+							bodyData.reminderAt !== undefined
+								? bodyData.reminderAt
+								: existingTodo.reminderAt,
+						estimatedMinutes:
+							bodyData.estimatedMinutes !== undefined
+								? bodyData.estimatedMinutes
+								: existingTodo.estimatedMinutes,
+						completedAt,
+					},
+				});
+
+				return reply.send({ success: true, data: updated });
+			} catch (error) {
+				request.log.error(error, "Failed to update todo");
+				return reply
+					.status(500)
+					.send({ success: false, message: "Failed to update todo" });
+			}
+		},
+	);
 
 	// DELETE /api/todos/:id - Soft Delete (must belong to requester)
-	fastify.delete("/:id", async (request, reply) => {
-		const paramResult = todoIdParamSchema.safeParse(request.params);
-		if (!paramResult.success) {
-			return reply.status(400).send({
-				success: false,
-				error: "Invalid route parameter",
-				details: paramResult.error.flatten().fieldErrors,
-			});
-		}
-
-		const { id } = paramResult.data;
-		const userId = request.user!.id;
-		try {
-			const result = await prisma.todo.updateMany({
-				where: { id, userId, deletedAt: null },
-				data: { deletedAt: new Date() },
-			});
-
-			if (result.count === 0) {
-				return reply.status(404).send({ success: false, message: "Not found" });
+	fastify.delete(
+		"/:id",
+		{
+			config: {
+				rateLimit: {
+					max: 20,
+					timeWindow: "1 minute",
+					keyGenerator: (request) => {
+						const userId = request.user?.id ?? "anonymous";
+						const clientIp = request.ip;
+						return `delete-todo:${userId}:${clientIp}`;
+					},
+				},
+			},
+		},
+		async (request, reply) => {
+			const paramResult = todoIdParamSchema.safeParse(request.params);
+			if (!paramResult.success) {
+				return reply.status(400).send({
+					success: false,
+					error: "Invalid route parameter",
+					details: paramResult.error.flatten().fieldErrors,
+				});
 			}
 
-			return reply.send({ success: true, message: "Todo soft-deleted" });
-		} catch (error) {
-			request.log.error(error, "Failed to delete todo");
-			return reply
-				.status(500)
-				.send({ success: false, message: "Failed to delete todo" });
-		}
-	});
+			const { id } = paramResult.data;
+			const userId = request.user!.id;
+			try {
+				const result = await prisma.todo.updateMany({
+					where: { id, userId, deletedAt: null },
+					data: { deletedAt: new Date() },
+				});
+
+				if (result.count === 0) {
+					return reply
+						.status(404)
+						.send({ success: false, message: "Not found" });
+				}
+
+				return reply.send({ success: true, message: "Todo soft-deleted" });
+			} catch (error) {
+				request.log.error(error, "Failed to delete todo");
+				return reply
+					.status(500)
+					.send({ success: false, message: "Failed to delete todo" });
+			}
+		},
+	);
 };
