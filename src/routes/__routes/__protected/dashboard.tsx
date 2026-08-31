@@ -487,7 +487,7 @@ function Dashboard() {
 
 	const toggleStatusMutation = useMutation({
 		mutationFn: async ({ id, status }: { id: string; status: string }) => {
-			const nextStatus = status === "COMPLETED" ? "TODO" : "COMPLETED";
+			const nextStatus = status === "COMPLETED" ? "IN_PROGRESS" : "COMPLETED";
 			const validated = updateTodoStatusSchema.parse({
 				id,
 				status: nextStatus,
@@ -534,6 +534,7 @@ function Dashboard() {
 		},
 		onSettled: () => {
 			queryClient.invalidateQueries({ queryKey: ["todos"] });
+			queryClient.invalidateQueries({ queryKey: ["todo-stats"] });
 		},
 	});
 
@@ -751,11 +752,11 @@ function Dashboard() {
 											{pageTitle}
 										</h1>
 
-										{isFetching && (
+										{/*isFetching && (
 											<span className="hidden rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500 sm:inline-flex">
 												Fetching...
 											</span>
-										)}
+										)*/}
 									</div>
 
 									<p
@@ -1124,7 +1125,7 @@ function SidebarContent({
 							No projects yet
 						</p>
 					) : (
-						<div className="space-y-0.5">
+						<div className="space-y-0.5 hover:bg-(--bg)">
 							{projects.map((project) => {
 								const active = searchParams.projectId === project.id;
 								return (
@@ -1138,15 +1139,9 @@ function SidebarContent({
 												page: 1,
 											})
 										}
-										className="
-											flex w-full min-w-0
-											items-center gap-2.5
-											rounded-lg px-2.5 py-2
-											text-left text-xs
-											transition-colors
-										"
+										className="flex w-full min-w-0 items-center gap-2.5 rounded-sm px-2.5 py-2 text-left text-xs transition-colors"
 										style={{
-											backgroundColor: active ? "var(--bg)" : "transparent",
+											backgroundColor: active ? "var(--link)" : "",
 											color: "var(--text)",
 										}}
 									>
@@ -1577,7 +1572,7 @@ function PriorityMenu({
 				</button>
 			</DropdownMenuTrigger>
 
-			<DropdownMenuContent align="start">
+			<DropdownMenuContent align="start" className="bg-(--bg)">
 				{PRIORITY_OPTIONS.map((option) => (
 					<DropdownMenuItem
 						key={option}

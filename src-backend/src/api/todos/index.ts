@@ -25,7 +25,7 @@ const getTodosQuerySchema = z.object({
 	page: z.coerce.number().int().min(1).default(1),
 	limit: z.coerce.number().int().min(1).max(100).default(10),
 	search: z.string().trim().max(200).optional(),
-	status: z.enum(["TODO", "IN_PROGRESS", "COMPLETED"]).optional(),
+	status: z.enum(["IN_PROGRESS", "COMPLETED"]).optional(),
 	projectId: z.string().min(1).optional(),
 });
 
@@ -36,7 +36,7 @@ const todoIdParamSchema = z.object({
 const createTodoSchema = z.object({
 	title: z.string().trim().min(1, "Title is required").max(255),
 	description: z.string().trim().max(5000).optional(),
-	status: z.enum(["TODO", "IN_PROGRESS", "COMPLETED"]).default("TODO"),
+	status: z.enum(["IN_PROGRESS", "COMPLETED"]).default("IN_PROGRESS"),
 	priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).default("MEDIUM"),
 	dueDate: z.coerce.date().optional(),
 	reminderAt: z.coerce.date().optional(),
@@ -51,7 +51,10 @@ const createTodoSchema = z.object({
 const updateTodoSchema = z.object({
 	title: z.string().trim().min(1).max(255).optional(),
 	description: z.string().trim().max(5000).nullable().optional(),
-	status: z.enum(["TODO", "IN_PROGRESS", "COMPLETED"]).optional(),
+	status: z
+		.enum(["IN_PROGRESS", "COMPLETED"])
+		.optional()
+		.default("IN_PROGRESS"),
 	priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional(),
 	dueDate: z.coerce.date().nullable().optional(),
 	reminderAt: z.coerce.date().nullable().optional(),
@@ -247,7 +250,7 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 			return reply.status(400).send({
 				success: false,
 				error: "Invalid request payload",
-				details: bodyResult.error.flatten().fieldErrors,
+				details: z.flattenError(bodyResult.error),
 			});
 		}
 

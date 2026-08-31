@@ -82,10 +82,8 @@ model Verification {
   @@index([identifier(length: 191)])
   @@map("verification")
 }
-// ==========================================
-// TODO APP CORE SCHEMAS
-// ==========================================
 
+// TODO APP CORE SCHEMAS
 enum Priority {
   LOW
   MEDIUM
@@ -94,20 +92,15 @@ enum Priority {
 }
 
 enum TodoStatus {
-  BACKLOG
-  TODO
   IN_PROGRESS
-  IN_REVIEW
   COMPLETED
-  CANCELLED
 }
 
 model Project {
   id          String   @id @default(cuid())
   name        String   @db.VarChar(191)
   description String?  @db.Text
-  color       String?  @db.VarChar(30) // Hex or Tailwind color class
-  icon        String?  @db.VarChar(50)
+  color       String?  @db.VarChar(30) 
   isArchived  Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -142,7 +135,7 @@ model Todo {
   id           String     @id @default(cuid())
   title        String     @db.VarChar(255)
   description  String?    @db.Text
-  status       TodoStatus @default(TODO)
+  status       TodoStatus @default(IN_PROGRESS)
   priority     Priority   @default(MEDIUM)
   position     Float      @default(0) // Fractional indexing for reordering
   reorderIndex Float      @default(0) // Added sorting/reordering index
