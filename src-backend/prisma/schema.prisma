@@ -139,12 +139,13 @@ model Tag {
 }
 
 model Todo {
-  id          String     @id @default(cuid())
-  title       String     @db.VarChar(255)
-  description String?    @db.Text
-  status      TodoStatus @default(TODO)
-  priority    Priority   @default(MEDIUM)
-  position    Float      @default(0) // Fractional indexing for reordering
+  id           String     @id @default(cuid())
+  title        String     @db.VarChar(255)
+  description  String?    @db.Text
+  status       TodoStatus @default(TODO)
+  priority     Priority   @default(MEDIUM)
+  position     Float      @default(0) // Fractional indexing for reordering
+  reorderIndex Float      @default(0) // Added sorting/reordering index
 
   // Dates & Scheduling
   dueDate     DateTime?

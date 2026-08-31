@@ -1,10 +1,15 @@
+import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
 import { useDebouncedCallback } from "@tanstack/react-pacer";
-import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
+import {
+	queryOptions,
+	useIsMutating,
+	useMutation,
+	useQuery,
+} from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { invoke } from "@tauri-apps/api/core";
 import { isAxiosError } from "axios";
 import {
-	BarChart3,
 	CalendarDays,
 	Check,
 	CheckCircle2,
@@ -27,7 +32,7 @@ import {
 	TrendingUp,
 	X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { z } from "zod";
 
 import { axios } from "#/lib/utils";
@@ -89,12 +94,13 @@ interface Todo {
 	priority: "LOW" | "MEDIUM" | "HIGH" | "URGENT";
 	isPinned?: boolean;
 	dueDate?: string | null;
+	reorderIndex: number;
 	project?: {
 		name: string;
 	} | null;
 	tags?: TodoTag[];
-	children?: unknown[];
-	attachments?: unknown[];
+	children?: any[];
+	attachments?: any[];
 }
 
 const TITLE_MAX_LENGTH = 255;
@@ -127,7 +133,7 @@ export const createTodoSchema = z.object({
 	status: todoStatusEnum.optional().default("TODO"),
 	priority: priorityEnum.optional().default("MEDIUM"),
 	projectId: z.string().optional().nullable(),
-	dueDate: z.string().datetime().optional().nullable(),
+	dueDate: z.date().optional().nullable(),
 	estimatedMinutes: z.number().int().min(0).optional().nullable(),
 });
 
@@ -161,6 +167,7 @@ const wifiConnectionQueryOptions = () =>
 			} else {
 				console.log("No internet connection.");
 			}
+			return [];
 		},
 		refetchInterval: 5000,
 	});
@@ -173,12 +180,14 @@ const fetchTodoQueryOptions = ({
 	projectId,
 }: TodoSearchParams) =>
 	queryOptions({
-		queryKey: ["todos", page, limit, search],
+		queryKey: ["todos", page, limit, search, tab, projectId],
 		queryFn: () => fetchTodosApi({ page, limit, search, tab, projectId }),
+		placeholderData: (previousData) => previousData,
 		retry: (failureCount, error) => {
 			console.error(error);
 			return failureCount < 2;
 		},
+		refetchInterval: 5000,
 	});
 
 async function fetchTodosApi({
@@ -204,16 +213,25 @@ async function fetchTodosApi({
 			},
 		});
 
-		return response.data || [];
+		const rawData = response.data || [];
+
+		if (rawData.data && Array.isArray(rawData.data)) {
+			rawData.data.sort(
+				(a: Todo, b: Todo) => (a.reorderIndex ?? 0) - (b.reorderIndex ?? 0),
+			);
+		}
+
+		return rawData;
 	} catch (e) {
 		console.error("Error @ fetchTodosApi", e);
+		return { data: [], totalCount: 0, totalPages: 1 };
 	}
 }
 
 async function fetchProjectsApi() {
 	try {
 		const response = await axios.get("/projects");
-		console.log("fahh", response.data);
+		console.log(response.data, "fah");
 		return response.data || [];
 	} catch (e) {
 		console.error("fetchProjectsApi", e);
@@ -240,7 +258,7 @@ async function fetchStatsApi() {
 
 function Dashboard() {
 	const { queryClient } = Route.useRouteContext();
-	const navigate = useNavigate({ from: Route.fullPath });
+	const navigate = Route.useNavigate();
 	const { page, limit, search, tab, projectId } = Route.useSearch();
 
 	const [mobileOpen, setMobileOpen] = useState(false);
@@ -253,8 +271,6 @@ function Dashboard() {
 
 	const searchTodoDebounceFn = useDebouncedCallback(
 		async (query: string) => {
-			console.log("TODO Debounce logging", query);
-			// await queryClient.refetchQueries({ queryKey: ["todos"] });
 			updateSearchParams({ search: query });
 		},
 		{
@@ -262,42 +278,173 @@ function Dashboard() {
 		},
 	);
 
-	// ====
 	const { data: sessionData } = authClient.useSession();
 	const currentUser = sessionData?.user;
 
-	const updateSearchParams = (params: Partial<TodoSearchParams>) => {
+	const updateSearchParams = async (params: Partial<TodoSearchParams>) => {
 		navigate({
-			search: (prev) => ({
-				...prev,
-				...params,
-			}),
+			search: (prev) => {
+				return {
+					...prev,
+					...params,
+				};
+			},
 		});
+		await queryClient.invalidateQueries({ queryKey: ["todos"] });
 	};
+
+	const isReordering = useIsMutating({ mutationKey: ["reorder-todos"] }) > 0;
 
 	const {
 		data: todosRes,
-		isLoading,
+		isPending,
 		isPlaceholderData,
 		isFetching,
-	} = useQuery(fetchTodoQueryOptions({ page, limit, search, tab, projectId }));
+	} = useQuery({
+		...fetchTodoQueryOptions({ page, limit, search, tab, projectId }),
+		// Don't let the automatic poll race the optimistic reorder update —
+		// it can win the race against the mutation's own refetch and briefly
+		// flash the pre-drag order back onto the screen.
+		refetchInterval: isReordering ? false : 5000,
+	});
 
-	const _IGNORED_CHECKS_FOR_WIFI = useQuery(wifiConnectionQueryOptions());
+	const _IGNORED______THIS_CHECKS_FOR_WIFI = useQuery(
+		wifiConnectionQueryOptions(),
+	);
 
 	const { data: projectsRes } = useQuery({
 		queryKey: ["projects"],
 		queryFn: fetchProjectsApi,
+		refetchInterval: 5000,
 	});
 
 	const { data: tagsRes } = useQuery({
 		queryKey: ["tags"],
 		queryFn: fetchTagsApi,
+		refetchInterval: 5000,
 	});
 
 	const { data: statsRes } = useQuery({
 		queryKey: ["todo-stats"],
 		queryFn: fetchStatsApi,
+		refetchInterval: 5000,
 	});
+
+	const updateTodoMutation = useMutation({
+		mutationFn: async ({
+			id,
+			...payload
+		}: {
+			id: string;
+			title?: string;
+			description?: string | null;
+			priority?: Todo["priority"];
+		}) => {
+			const response = await axios.patch(`/todos/${id}`, payload);
+			return response.data;
+		},
+		onMutate: async ({ id, ...payload }) => {
+			await queryClient.cancelQueries({ queryKey: ["todos"] });
+
+			const previousQueries = queryClient.getQueriesData({
+				queryKey: ["todos"],
+			});
+
+			queryClient.setQueriesData({ queryKey: ["todos"] }, (old: any) => {
+				if (!old) return old;
+
+				if (old.data && Array.isArray(old.data)) {
+					return {
+						...old,
+						data: old.data.map((todo: Todo) =>
+							todo.id === id ? { ...todo, ...payload } : todo,
+						),
+					};
+				}
+
+				if (Array.isArray(old)) {
+					return old.map((todo: Todo) =>
+						todo.id === id ? { ...todo, ...payload } : todo,
+					);
+				}
+
+				return old;
+			});
+
+			return { previousQueries };
+		},
+		onError: (_err, _variables, context) => {
+			if (context?.previousQueries) {
+				context.previousQueries.forEach(([queryKey, data]) => {
+					queryClient.setQueryData(queryKey, data);
+				});
+			}
+		},
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
+		},
+	});
+
+	const reorderTodosMutation = useMutation({
+		mutationKey: ["reorder-todos"],
+		mutationFn: async (orderedIds: string[]) => {
+			const response = await axios.post("/todos/reorder", { orderedIds });
+			return response.data;
+		},
+		onMutate: async (orderedIds) => {
+			await queryClient.cancelQueries({ queryKey: ["todos"] });
+			const previousQueries = queryClient.getQueriesData({
+				queryKey: ["todos"],
+			});
+
+			queryClient.setQueriesData({ queryKey: ["todos"] }, (old: any) => {
+				if (!old) return old;
+				const dataList = old.data || old;
+				if (!Array.isArray(dataList)) return old;
+
+				const map = new Map(dataList.map((t: Todo) => [t.id, t]));
+				// Assign reorderIndex to match the position each item will land
+				// on the server (see the /todos/reorder route, which sets
+				// reorderIndex = array index). Keeping this in sync locally
+				// means any refetch that lands mid-drag or right after won't
+				// disagree with what's already on screen and cause a flash.
+				const reordered = orderedIds
+					.map((id, index) => {
+						const todo = map.get(id) as Todo | undefined;
+						return todo ? { ...todo, reorderIndex: index } : undefined;
+					})
+					.filter(Boolean);
+
+				return old.data ? { ...old, data: reordered } : reordered;
+			});
+
+			return { previousQueries };
+		},
+		onError: (_err, _vars, context) => {
+			if (context?.previousQueries) {
+				context.previousQueries.forEach(([queryKey, data]) => {
+					queryClient.setQueryData(queryKey, data);
+				});
+			}
+			// Only force a refetch to resync with the server when something
+			// actually went wrong — on success the optimistic state above
+			// already matches what was persisted, so refetching immediately
+			// would just cause a pointless flash.
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
+		},
+	});
+
+	const handleDragEnd = (result: any) => {
+		if (!result.destination) return;
+		if (result.destination.index === result.source.index) return;
+
+		const items = Array.from(todos);
+		const [reorderedItem] = items.splice(result.source.index, 1);
+		items.splice(result.destination.index, 0, reorderedItem);
+
+		const orderedIds = items.map((t) => t.id);
+		reorderTodosMutation.mutate(orderedIds);
+	};
 
 	const createTodoMutation = useMutation({
 		mutationFn: async (payload: { title: string; description?: string }) => {
@@ -327,10 +474,6 @@ function Dashboard() {
 		},
 
 		onError: (error: unknown) => {
-			if (isAxiosError(error) && error.response?.status === 401) {
-				return;
-			}
-
 			const message =
 				error instanceof Error
 					? error.message
@@ -342,58 +485,53 @@ function Dashboard() {
 		},
 	});
 
-	// Toggle status functions
 	const toggleStatusMutation = useMutation({
 		mutationFn: async ({ id, status }: { id: string; status: string }) => {
-			try {
-				const nextStatus = status === "COMPLETED" ? "TODO" : "COMPLETED";
+			const nextStatus = status === "COMPLETED" ? "TODO" : "COMPLETED";
+			const validated = updateTodoStatusSchema.parse({
+				id,
+				status: nextStatus,
+			});
 
-				const validated = updateTodoStatusSchema.parse({
-					id,
-					status: nextStatus,
-				});
+			const response = await axios.patch(`/todos/${validated.id}`, {
+				status: validated.status,
+			});
 
-				const response = await axios.patch(`/todos/${validated.id}`, {
-					status: validated.status,
-				});
-
-				return response.data;
-			} catch (e) {
-				console.error("toggleStatusMutation @ ", e);
-			}
+			return response.data;
 		},
-		onMutate: async (updatedTodo) => {
-			// Cancel any outgoing refetches so they don't overwrite our optimistic update
+		onMutate: async ({ id, status }) => {
 			await queryClient.cancelQueries({ queryKey: ["todos"] });
+			const previousTodos = queryClient.getQueryData(["todos"]);
+			const nextStatus = status === "COMPLETED" ? "TODO" : "COMPLETED";
 
-			// Snapshot the previous value in case we need to roll back
-			const previousTodos = queryClient.getQueryData<Todo[]>(["todos"]);
+			queryClient.setQueriesData({ queryKey: ["todos"] }, (old: any) => {
+				if (!old) return old;
 
-			// Optimistically update the cache instantly
-			queryClient.setQueryData(["todos"], (old: Todo[]) =>
-				old?.map((todo) =>
-					todo.id === updatedTodo.id
-						? {
-								...todo,
-								status:
-									updatedTodo.status === "completed" ? "pending" : "completed",
-							}
-						: todo,
-				),
-			);
+				if (old.data && Array.isArray(old.data)) {
+					return {
+						...old,
+						data: old.data.map((todo: Todo) =>
+							todo.id === id ? { ...todo, status: nextStatus } : todo,
+						),
+					};
+				}
 
-			// Return a context object with the snapshotted value
+				if (Array.isArray(old)) {
+					return old.map((todo: Todo) =>
+						todo.id === id ? { ...todo, status: nextStatus } : todo,
+					);
+				}
+
+				return old;
+			});
+
 			return { previousTodos };
 		},
-
-		// 2. If the mutation fails, use the context we returned above to roll back
-		onError: (err, newTodo, context) => {
+		onError: (_err, _variables, context) => {
 			if (context?.previousTodos) {
 				queryClient.setQueryData(["todos"], context.previousTodos);
 			}
 		},
-
-		// 3. Always refetch or invalidate after success or error to sync with the server
 		onSettled: () => {
 			queryClient.invalidateQueries({ queryKey: ["todos"] });
 		},
@@ -403,13 +541,12 @@ function Dashboard() {
 		(args: { id: string; status: string }) => {
 			toggleStatusMutation.mutate(args);
 		},
-		{ wait: 150 }, // Time in milliseconds to wait before executing
+		{ wait: 150 },
 	);
-	// ====
 
 	const todos: Todo[] = todosRes?.data ?? [];
-	const projects: Project[] = projectsRes?.data ?? [];
-	const tags: Tag[] = tagsRes?.data ?? [];
+	const projects: Project[] = projectsRes ?? [];
+	const tags: Tag[] = tagsRes ?? [];
 
 	const totalPages = Math.max(todosRes?.totalPages ?? 1, 1);
 
@@ -445,7 +582,6 @@ function Dashboard() {
 				color: "var(--text)",
 			}}
 		>
-			{/* Desktop navigation */}
 			<aside
 				className="
 					hidden lg:flex
@@ -468,7 +604,6 @@ function Dashboard() {
 				/>
 			</aside>
 
-			{/* Mobile / tablet navigation */}
 			<Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
 				<SheetContent
 					side="left"
@@ -495,11 +630,9 @@ function Dashboard() {
 						projects={projects}
 						tags={tags}
 						currentUser={currentUser}
-						navigate={navigate}
 					/>
 				</SheetContent>
 
-				{/* Main application */}
 				<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
 					<header
 						className="
@@ -606,13 +739,11 @@ function Dashboard() {
 
 					<main className="min-h-0 flex-1 overflow-y-auto">
 						<div className="mx-auto w-full max-w-[1500px] p-3 sm:p-5 lg:p-7">
-							{/* Page heading */}
 							<div className="mb-5 flex items-end justify-between gap-4">
 								<div className="min-w-0">
 									<div className="flex items-center gap-2">
 										<h1
-											className="truncate text-xl font-bold tracking-tight sm:text-2xl
-											"
+											className="truncate text-xl font-bold tracking-tight sm:text-2xl"
 											style={{
 												color: "var(--text)",
 											}}
@@ -621,10 +752,7 @@ function Dashboard() {
 										</h1>
 
 										{isFetching && (
-											<span
-												className="hidden rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500 sm:inline-flex
-												"
-											>
+											<span className="hidden rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500 sm:inline-flex">
 												Fetching...
 											</span>
 										)}
@@ -663,7 +791,6 @@ function Dashboard() {
 								</div>
 							</div>
 
-							{/* Stats */}
 							<div
 								className="
 									mb-5
@@ -692,17 +819,8 @@ function Dashboard() {
 									)}h ${stats.remainingMinutes % 60}m`}
 									icon={<Clock3 className="h-4 w-4 text-amber-500" />}
 								/>
-
-								{/*
-								<StatCard
-									title="Page"
-									value={`${page}/${totalPages}`}
-									icon={<BarChart3 className="h-4 w-4 text-violet-500" />}
-								/>
-								*/}
 							</div>
 
-							{/* Tasks */}
 							<Card
 								className="overflow-hidden gap-0 rounded-xl shadow-none"
 								style={{
@@ -750,50 +868,70 @@ function Dashboard() {
 								</CardHeader>
 
 								<CardContent className="p-0 w-full">
-									{/* 1. Initial Loading State: True only on first load, shows nothing else */}
-									{isLoading && (
+									{isPending && !isPlaceholderData && todos.length === 0 ? (
 										<Label className="w-full p-5 flex justify-center text-(--text)">
 											Loading...
 										</Label>
-									)}
+									) : (
+										<DragDropContext onDragEnd={handleDragEnd}>
+											<Droppable droppableId="todo-list">
+												{(provided) => (
+													<div
+														{...provided.droppableProps}
+														ref={provided.innerRef}
+													>
+														{todos.length <= 0 && (
+															<EmptyState
+																search={Boolean(search)}
+																onCreate={() => setIsCreateOpen(true)}
+															/>
+														)}
 
-									{/* 2. Content Container: Only render if we are NOT in the initial hard loading state */}
-									{!isLoading && (
-										<div>
-											{/* 3. Empty State: Only shows if the array is empty AND we aren't waiting for the initial load */}
-											{todos.length === 0 ? (
-												<EmptyState
-													search={Boolean(search)}
-													onCreate={() => setIsCreateOpen(true)}
-												/>
-											) : (
-												/* 4. Active List: Shows the cached todos instantly, even if a background refetch is running */
-												<div>
-													{todos.map((todo) => (
-														<TodoRow
-															key={todo.id}
-															todo={todo}
-															onToggle={() =>
-																debouncedToggle({
-																	id: todo.id,
-																	status: todo.status,
-																})
-															}
-														/>
-													))}
-												</div>
-											)}
-
-											{/*isFetching && !isLoading && (
-												<span className="text-xs text-gray-400">
-													Updating list...
-												</span>
-											)*/}
-										</div>
+														{todos.map((todo, index) => (
+															<Draggable
+																key={todo.id}
+																draggableId={todo.id}
+																index={index}
+															>
+																{(provided, snapshot) => (
+																	<div
+																		ref={provided.innerRef}
+																		{...provided.draggableProps}
+																		style={{
+																			...provided.draggableProps.style,
+																			backgroundColor: snapshot.isDragging
+																				? "var(--bg)"
+																				: "inherit",
+																		}}
+																	>
+																		<TodoRow
+																			todo={todo}
+																			dragHandleProps={provided.dragHandleProps}
+																			onToggle={() =>
+																				debouncedToggle({
+																					id: todo.id,
+																					status: todo.status,
+																				})
+																			}
+																			onUpdateTodo={(payload) =>
+																				updateTodoMutation.mutate({
+																					id: todo.id,
+																					...payload,
+																				})
+																			}
+																		/>
+																	</div>
+																)}
+															</Draggable>
+														))}
+														{provided.placeholder}
+													</div>
+												)}
+											</Droppable>
+										</DragDropContext>
 									)}
 								</CardContent>
 
-								{/* Pagination */}
 								<div
 									className="
 										flex flex-wrap
@@ -850,7 +988,6 @@ function Dashboard() {
 				</div>
 			</Sheet>
 
-			{/* Create task */}
 			<CreateTaskDialog
 				open={isCreateOpen}
 				onOpenChange={setIsCreateOpen}
@@ -872,17 +1009,12 @@ function Dashboard() {
 	);
 }
 
-/* -------------------------------------------------------------------------- */
-/* Sidebar                                                                    */
-/* -------------------------------------------------------------------------- */
-
 function SidebarContent({
 	searchParams,
 	updateSearchParams,
 	projects,
 	tags,
 	currentUser,
-	navigate,
 }: {
 	searchParams: TodoSearchParams;
 	updateSearchParams: (params: Partial<TodoSearchParams>) => void;
@@ -892,12 +1024,11 @@ function SidebarContent({
 		name?: string;
 		email?: string;
 	} | null;
-	navigate: (opts: { to: string; reloadDocument?: boolean }) => void;
 }) {
+	const { queryClient } = Route.useRouteContext();
 	return (
 		<div className="flex h-full min-h-0 w-full flex-col">
 			<div className="min-h-0 flex-1 overflow-y-auto p-4">
-				{/* Brand */}
 				<div className="mb-7 flex items-center gap-3 px-1">
 					<div
 						className="
@@ -935,7 +1066,6 @@ function SidebarContent({
 					</div>
 				</div>
 
-				{/* Main navigation */}
 				<div className="space-y-1">
 					<SidebarItem
 						icon={<Inbox className="h-4 w-4" />}
@@ -955,13 +1085,13 @@ function SidebarContent({
 						iconClassName="text-emerald-500"
 						label="Today"
 						active={searchParams.tab === "today"}
-						onClick={() =>
+						onClick={async () => {
 							updateSearchParams({
 								tab: "today",
 								projectId: undefined,
 								page: 1,
-							})
-						}
+							});
+						}}
 					/>
 
 					<SidebarItem
@@ -969,17 +1099,17 @@ function SidebarContent({
 						iconClassName="text-blue-500"
 						label="Completed"
 						active={searchParams.tab === "completed"}
-						onClick={() =>
+						onClick={async () => {
 							updateSearchParams({
 								tab: "completed",
 								projectId: undefined,
 								page: 1,
-							})
-						}
+							});
+							await queryClient.invalidateQueries({ queryKey: ["todos"] });
+						}}
 					/>
 				</div>
 
-				{/* Projects */}
 				<SidebarSection
 					title="Projects"
 					icon={<Folder className="h-3.5 w-3.5" />}
@@ -997,7 +1127,6 @@ function SidebarContent({
 						<div className="space-y-0.5">
 							{projects.map((project) => {
 								const active = searchParams.projectId === project.id;
-
 								return (
 									<button
 										key={project.id}
@@ -1031,7 +1160,6 @@ function SidebarContent({
 					)}
 				</SidebarSection>
 
-				{/* Tags */}
 				<SidebarSection title="Tags" icon={<TagIcon className="h-3.5 w-3.5" />}>
 					{tags.length === 0 ? (
 						<p
@@ -1047,13 +1175,7 @@ function SidebarContent({
 							{tags.map((tag) => (
 								<Badge
 									key={tag.id}
-									variant="secondary"
-									className="
-										rounded-md
-										px-2 py-1
-										text-[10px]
-										font-normal
-									"
+									className="bg-(--bg-secondary) outline outline-(--link) text-(--link) rounded-full px-2 text-[10px] font-normal"
 								>
 									#{tag.name}
 								</Badge>
@@ -1063,7 +1185,6 @@ function SidebarContent({
 				</SidebarSection>
 			</div>
 
-			{/* User */}
 			<div
 				className="shrink-0 border-t p-3"
 				style={{
@@ -1115,14 +1236,13 @@ function SidebarContent({
 
 						<DropdownMenuContent align="end">
 							<DropdownMenuItem
+								className="text-red-400"
 								onClick={() =>
 									authClient.signOut({
 										fetchOptions: {
-											onSuccess: () =>
-												navigate({
-													to: "/login",
-													reloadDocument: true,
-												}),
+											onSuccess: () => {
+												window.location.href = "/login";
+											},
 										},
 									})
 								}
@@ -1143,8 +1263,8 @@ function SidebarSection({
 	children,
 }: {
 	title: string;
-	icon: React.ReactNode;
-	children: React.ReactNode;
+	icon: ReactNode;
+	children: ReactNode;
 }) {
 	return (
 		<section className="mt-7">
@@ -1174,7 +1294,7 @@ function SidebarItem({
 	active,
 	onClick,
 }: {
-	icon: React.ReactNode;
+	icon: ReactNode;
 	iconClassName?: string;
 	label: string;
 	active?: boolean;
@@ -1195,47 +1315,86 @@ function SidebarItem({
 	);
 }
 
-/* -------------------------------------------------------------------------- */
-/* Todo row                                                                   */
-/* -------------------------------------------------------------------------- */
-
-function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
+function TodoRow({
+	todo,
+	onToggle,
+	onUpdateTodo,
+	dragHandleProps,
+}: {
+	todo: Todo;
+	onToggle: () => void;
+	onUpdateTodo: (payload: {
+		title?: string;
+		description?: string | null;
+		priority?: Todo["priority"];
+	}) => void;
+	dragHandleProps?: any;
+}) {
 	const completed = todo.status === "COMPLETED";
+
+	const [isEditingTitle, setIsEditingTitle] = useState(false);
+	const [isEditingDesc, setIsEditingDesc] = useState(false);
+
+	const titleRef = useRef<HTMLInputElement>(null);
+	const descRef = useRef<HTMLTextAreaElement>(null);
+
+	const handleSaveTitle = () => {
+		const newTitle = titleRef.current?.value.trim();
+
+		if (newTitle && newTitle !== todo.title) {
+			onUpdateTodo({ title: newTitle });
+		}
+		setIsEditingTitle(false);
+	};
+
+	const handleTitleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+		if (e.key === "Enter") {
+			e.preventDefault();
+			handleSaveTitle();
+		} else if (e.key === "Escape") {
+			setIsEditingTitle(false);
+		}
+	};
+
+	const handleSaveDesc = () => {
+		const newDesc = descRef.current?.value.trim() ?? "";
+		if (newDesc !== (todo.description ?? "")) {
+			onUpdateTodo({ description: newDesc || null });
+		}
+		setIsEditingDesc(false);
+	};
+
+	const handleDescKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		if (e.key === "Enter" && !e.shiftKey) {
+			e.preventDefault();
+			handleSaveDesc();
+		} else if (e.key === "Escape") {
+			setIsEditingDesc(false);
+		}
+	};
 
 	return (
 		<div
-			className={`py-3.5 group relative border-b last:border-b-0 px-3  transition-colors sm:px-5
-				${completed ? "opacity-60" : ""}
-			`}
-			style={{
-				borderColor: "var(--border)",
-			}}
+			className={`group relative border-b py-3.5 px-3 transition-colors sm:px-5 last:border-b-0 ${
+				completed ? "opacity-60" : ""
+			}`}
+			style={{ borderColor: "var(--border)" }}
 		>
 			<div className="flex min-w-0 items-start gap-2.5 sm:gap-3">
-				{/* Drag handle */}
-				<div className="hidden pt-1 sm:block">
+				<div
+					className="hidden pt-1 sm:block cursor-grab active:cursor-grabbing"
+					{...dragHandleProps}
+				>
 					<GripVertical
-						className="
-							h-4 w-4
-							opacity-0
-							transition-opacity
-							group-hover:opacity-30
-						"
-						style={{
-							color: "var(--text-secondary)",
-						}}
+						className="h-4 w-4 opacity-40 transition-opacity group-hover:opacity-100"
+						style={{ color: "var(--text-secondary)" }}
 					/>
 				</div>
 
-				{/* Complete */}
 				<Button
 					variant="ghost"
 					size="icon"
-					className="
-						mt-0.5 h-6 w-6
-						shrink-0 rounded-full
-						p-0
-					"
+					className="mt-0.5 h-6 w-6 shrink-0 rounded-full p-0"
 					onClick={onToggle}
 					aria-label={completed ? "Mark task incomplete" : "Mark task complete"}
 				>
@@ -1244,54 +1403,84 @@ function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
 					) : (
 						<Circle
 							className="h-5 w-5"
-							style={{
-								color: "var(--text-secondary)",
-							}}
+							style={{ color: "var(--text-secondary)" }}
 						/>
 					)}
 				</Button>
 
-				{/* Content */}
 				<div className="min-w-0 flex-1">
-					<div className="flex min-w-0 items-start gap-2">
+					<div className="flex min-w-0 items-center gap-2">
 						{todo.isPinned && (
 							<Pin className="mt-0.5 h-3.5 w-3.5 shrink-0 rotate-45 text-amber-500" />
 						)}
 
-						<h3
-							className={`min-w-0 flex-1 text-sm font-medium leading-5 sm:text-sm
-								${completed ? "line-through" : ""}
-							`}
-							style={{
-								color: completed ? "var(--text-secondary)" : "var(--text)",
-							}}
-						>
-							{todo.title}
-						</h3>
+						{isEditingTitle ? (
+							<Input
+								ref={titleRef}
+								autoFocus
+								defaultValue={todo.title}
+								maxLength={TITLE_MAX_LENGTH}
+								onBlur={handleSaveTitle}
+								onKeyDown={handleTitleKeyDown}
+								className="h-auto w-full rounded-none border-0 border-b border-blue-500 bg-transparent px-0 py-0 text-sm font-medium leading-5 shadow-none focus-visible:ring-0"
+								style={{ color: "var(--text)" }}
+							/>
+						) : (
+							<h3
+								onDoubleClick={() => !completed && setIsEditingTitle(true)}
+								title="Double-click to edit title"
+								className={`min-w-0 flex-1 select-none text-sm font-medium leading-5 transition-colors sm:text-sm ${
+									completed
+										? "line-through"
+										: "cursor-pointer hover:text-blue-500"
+								}`}
+								style={{
+									color: completed ? "var(--text-secondary)" : "var(--text)",
+								}}
+							>
+								{todo.title}
+							</h3>
+						)}
 					</div>
 
-					{todo.description && (
-						<p
-							className="mt-1 line-clamp-1 text-sm"
-							style={{
-								color: "var(--text-secondary)",
-							}}
-						>
-							{todo.description}
-						</p>
-					)}
+					<div className="mt-1">
+						{isEditingDesc ? (
+							<Textarea
+								ref={descRef}
+								autoFocus
+								rows={1}
+								defaultValue={todo.description ?? ""}
+								maxLength={DESCRIPTION_MAX_LENGTH}
+								onBlur={handleSaveDesc}
+								onKeyDown={handleDescKeyDown}
+								className="min-h-0 w-full resize-none rounded-none border-0 border-b border-blue-500 bg-transparent px-0 py-0 text-sm shadow-none focus-visible:ring-0"
+								style={{ color: "var(--text)" }}
+							/>
+						) : (
+							<p
+								onDoubleClick={() => !completed && setIsEditingDesc(true)}
+								title="Double-click to edit description"
+								className={`line-clamp-2 select-none text-sm transition-colors ${
+									completed ? "" : "cursor-pointer hover:text-blue-500"
+								}`}
+								style={{ color: "var(--text-secondary)" }}
+							>
+								{todo.description || (
+									<span className="italic opacity-40">
+										Double-click to add a description...
+									</span>
+								)}
+							</p>
+						)}
+					</div>
 
-					{/* Metadata */}
 					<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
 						{todo.project?.name && (
 							<span
 								className="flex min-w-0 max-w-[180px] items-center gap-1 text-[10px] font-medium"
-								style={{
-									color: "var(--text-secondary)",
-								}}
+								style={{ color: "var(--text-secondary)" }}
 							>
 								<Folder className="h-3 w-3 shrink-0" />
-
 								<span className="truncate">{todo.project.name}</span>
 							</span>
 						)}
@@ -1299,25 +1488,17 @@ function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
 						{todo.dueDate && (
 							<span
 								className="flex items-center gap-1 text-[10px]"
-								style={{
-									color: "var(--text-secondary)",
-								}}
+								style={{ color: "var(--text-secondary)" }}
 							>
 								<CalendarDays className="h-3 w-3" />
-
 								{formatDate(todo.dueDate)}
 							</span>
 						)}
 
 						{todo.children && todo.children.length > 0 && (
 							<span
-								className="
-										flex items-center gap-1
-										text-[10px]
-									"
-								style={{
-									color: "var(--text-secondary)",
-								}}
+								className="flex items-center gap-1 text-[10px]"
+								style={{ color: "var(--text-secondary)" }}
 							>
 								<CheckSquare className="h-3 w-3" />
 								{todo.children.length} subtasks
@@ -1326,13 +1507,8 @@ function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
 
 						{todo.attachments && todo.attachments.length > 0 && (
 							<span
-								className="
-										flex items-center gap-1
-										text-[10px]
-									"
-								style={{
-									color: "var(--text-secondary)",
-								}}
+								className="flex items-center gap-1 text-[10px]"
+								style={{ color: "var(--text-secondary)" }}
 							>
 								<Paperclip className="h-3 w-3" />
 								{todo.attachments.length}
@@ -1340,30 +1516,28 @@ function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
 						)}
 					</div>
 
-					{/* Mobile badges */}
 					<div className="mt-2.5 flex flex-wrap gap-1.5 lg:hidden">
-						<PriorityBadge priority={todo.priority} />
+						<PriorityMenu
+							priority={todo.priority}
+							disabled={completed}
+							onChange={(priority) => onUpdateTodo({ priority })}
+						/>
 						<StatusBadge status={todo.status} />
-
 						{todo.tags?.slice(0, 2).map((item) => (
 							<TagBadge key={item.tagId} name={item.tag?.name} />
 						))}
 					</div>
 				</div>
 
-				{/* Desktop badges */}
-				<div
-					className="
-						hidden shrink-0
-						items-center gap-1.5
-						lg:flex
-					"
-				>
+				<div className="hidden shrink-0 items-center gap-1.5 lg:flex">
 					{todo.tags?.slice(0, 3).map((item) => (
 						<TagBadge key={item.tagId} name={item.tag?.name} />
 					))}
-
-					<PriorityBadge priority={todo.priority} />
+					<PriorityMenu
+						priority={todo.priority}
+						disabled={completed}
+						onChange={(priority) => onUpdateTodo({ priority })}
+					/>
 					<StatusBadge status={todo.status} />
 				</div>
 			</div>
@@ -1371,9 +1545,55 @@ function TodoRow({ todo, onToggle }: { todo: Todo; onToggle: () => void }) {
 	);
 }
 
-/* -------------------------------------------------------------------------- */
-/* Stats                                                                      */
-/* -------------------------------------------------------------------------- */
+const PRIORITY_OPTIONS: Todo["priority"][] = [
+	"LOW",
+	"MEDIUM",
+	"HIGH",
+	"URGENT",
+];
+
+function PriorityMenu({
+	priority,
+	onChange,
+	disabled,
+}: {
+	priority: Todo["priority"];
+	onChange: (priority: Todo["priority"]) => void;
+	disabled?: boolean;
+}) {
+	if (disabled) {
+		return <PriorityBadge priority={priority} />;
+	}
+
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger asChild>
+				<button
+					type="button"
+					title="Click to change priority"
+					className="rounded-md outline-none transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-blue-500"
+				>
+					<PriorityBadge priority={priority} />
+				</button>
+			</DropdownMenuTrigger>
+
+			<DropdownMenuContent align="start">
+				{PRIORITY_OPTIONS.map((option) => (
+					<DropdownMenuItem
+						key={option}
+						onClick={() => onChange(option)}
+						className="flex items-center justify-between gap-3"
+					>
+						<PriorityBadge priority={option} />
+						{option === priority && (
+							<Check className="h-3.5 w-3.5" style={{ color: "var(--link)" }} />
+						)}
+					</DropdownMenuItem>
+				))}
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
 
 function StatCard({
 	title,
@@ -1382,11 +1602,11 @@ function StatCard({
 }: {
 	title: string;
 	value: string | number;
-	icon: React.ReactNode;
+	icon: ReactNode;
 }) {
 	return (
 		<Card
-			className="rounded-xl shadow-none"
+			className="rounded-xl shadow-none h-25 flex justify-center"
 			style={{
 				backgroundColor: "var(--bg-secondary)",
 				borderColor: "var(--border)",
@@ -1395,8 +1615,7 @@ function StatCard({
 			<CardContent className="p-3 sm:p-4">
 				<div className="flex items-center justify-between gap-2">
 					<span
-						className="truncate text-[10px] font-medium uppercase tracking-wide sm:text-[11px]
-						"
+						className="truncate text-[10px] font-medium uppercase tracking-wide sm:text-[11px]"
 						style={{
 							color: "var(--text-secondary)",
 						}}
@@ -1424,10 +1643,6 @@ function StatCard({
 		</Card>
 	);
 }
-
-/* -------------------------------------------------------------------------- */
-/* Badges                                                                     */
-/* -------------------------------------------------------------------------- */
 
 function PriorityBadge({ priority }: { priority: Todo["priority"] }) {
 	const styles: Record<
@@ -1464,8 +1679,7 @@ function PriorityBadge({ priority }: { priority: Todo["priority"] }) {
 
 	return (
 		<span
-			className="px-2.5 items-center rounded-md py-0.5 text-[9px] font-semibold
-			"
+			className="px-2.5 flex items-center rounded-md py-0.5 text-[9px]"
 			style={{
 				color: style.color,
 				backgroundColor: style.background,
@@ -1488,8 +1702,7 @@ function StatusBadge({ status }: { status: Todo["status"] }) {
 
 	return (
 		<span
-			className="px-2.5 items-center rounded-md py-0.5 text-[9px] font-medium
-			"
+			className="px-2.5 flex items-center rounded-md py-0.5 text-[9px]"
 			style={{
 				color: status === "COMPLETED" ? "#10b981" : "var(--text-secondary)",
 				backgroundColor: status === "COMPLETED" ? "#10b98114" : "var(--bg)",
@@ -1505,8 +1718,7 @@ function TagBadge({ name }: { name?: string }) {
 
 	return (
 		<span
-			className="px-2.5 truncate rounded-md border py-0.5 text-[9px]
-			"
+			className="px-2.5 items-center rounded-md py-0.5 text-[9px]"
 			style={{
 				borderColor: "var(--border)",
 				color: "var(--text-secondary)",
@@ -1516,10 +1728,6 @@ function TagBadge({ name }: { name?: string }) {
 		</span>
 	);
 }
-
-/* -------------------------------------------------------------------------- */
-/* Empty state                                                                */
-/* -------------------------------------------------------------------------- */
 
 function EmptyState({
 	search,
@@ -1593,10 +1801,6 @@ function EmptyState({
 		</div>
 	);
 }
-
-/* -------------------------------------------------------------------------- */
-/* Create dialog                                                               */
-/* -------------------------------------------------------------------------- */
 
 function CreateTaskDialog({
 	open,
@@ -1757,20 +1961,7 @@ function CreateTaskDialog({
 	);
 }
 
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
-/* -------------------------------------------------------------------------- */
-
 function ProjectDot({ color }: { color?: string }) {
-	/*
-	 * Supports either:
-	 *
-	 * color = "bg-indigo-500"
-	 *
-	 * or:
-	 *
-	 * color = "#6366f1"
-	 */
 	if (!color) {
 		return <span className="h-2 w-2 shrink-0 rounded-full bg-indigo-500" />;
 	}

@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@faker-js/faker": "^10.3.0",
+    "@hello-pangea/dnd": "^18.0.1",
     "@tailwindcss/vite": "^4.1.18",
     "@tanstack/match-sorter-utils": "latest",
     "@tanstack/react-devtools": "latest",

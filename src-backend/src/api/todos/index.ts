@@ -20,6 +20,7 @@ function assertBodyUserIdMatchesSession(
 }
 
 // Zod schemas
+// Zod schemas
 const getTodosQuerySchema = z.object({
 	page: z.coerce.number().int().min(1).default(1),
 	limit: z.coerce.number().int().min(1).max(100).default(10),
@@ -32,9 +33,6 @@ const todoIdParamSchema = z.object({
 	id: z.string().min(1, "Todo ID is required"),
 });
 
-// userId is accepted here ONLY so it can be compared against the session
-// (see assertBodyUserIdMatchesSession). It is never read for authorization —
-// the actual owner written to the DB is always request.user.id.
 const createTodoSchema = z.object({
 	title: z.string().trim().min(1, "Title is required").max(255),
 	description: z.string().trim().max(5000).optional(),
@@ -45,10 +43,29 @@ const createTodoSchema = z.object({
 	estimatedMinutes: z.number().int().nonnegative().max(100000).optional(),
 	projectId: z.string().optional(),
 	parentId: z.string().optional(),
-	userId: z.string().optional(), // consistency check only — see above
+	reorderIndex: z.number().default(0),
+	userId: z.string().optional(),
 });
 
-const updateTodoSchema = createTodoSchema.partial().extend({
+// Schema strictly for updating an existing todo (NO defaults that override omitted fields)
+const updateTodoSchema = z.object({
+	title: z.string().trim().min(1).max(255).optional(),
+	description: z.string().trim().max(5000).nullable().optional(),
+	status: z.enum(["TODO", "IN_PROGRESS", "COMPLETED"]).optional(),
+	priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional(),
+	dueDate: z.coerce.date().nullable().optional(),
+	reminderAt: z.coerce.date().nullable().optional(),
+	estimatedMinutes: z
+		.number()
+		.int()
+		.nonnegative()
+		.max(100000)
+		.nullable()
+		.optional(),
+	projectId: z.string().nullable().optional(),
+	parentId: z.string().nullable().optional(),
+	reorderIndex: z.number().optional(),
+	userId: z.string().optional(),
 	completedAt: z.coerce.date().nullable().optional(),
 	isPinned: z.boolean().optional(),
 });
@@ -60,6 +77,57 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 	// Require auth for every route in this plugin.
 	fastify.addHook("preHandler", requireAuth);
 
+	// Add near your other schemas
+	const reorderTodosSchema = z.object({
+		orderedIds: z.array(z.string().min(1)).min(1).max(500),
+	});
+
+	// Handles reordering by DnD in client
+	fastify.post("/reorder", async (request, reply) => {
+		const bodyResult = reorderTodosSchema.safeParse(request.body);
+		if (!bodyResult.success) {
+			return reply.status(400).send({
+				success: false,
+				error: "Invalid request payload",
+				details: bodyResult.error.flatten().fieldErrors,
+			});
+		}
+
+		const { orderedIds } = bodyResult.data;
+		const userId = request.user!.id;
+
+		try {
+			const owned = await prisma.todo.findMany({
+				where: { id: { in: orderedIds }, userId, deletedAt: null },
+				select: { id: true },
+			});
+
+			if (owned.length !== orderedIds.length) {
+				return reply.status(403).send({
+					success: false,
+					message: "One or more todos were not found or are not yours",
+				});
+			}
+
+			// Single atomic transaction — either the whole new order lands, or none of it does.
+			await prisma.$transaction(
+				orderedIds.map((id, index) =>
+					prisma.todo.update({
+						where: { id },
+						data: { reorderIndex: index },
+					}),
+				),
+			);
+
+			return reply.send({ success: true });
+		} catch (error) {
+			request.log.error(error, "Failed to reorder todos");
+			return reply
+				.status(500)
+				.send({ success: false, message: "Failed to reorder todos" });
+		}
+	});
+
 	// GET /api/todos - Paginated & Searchable List (own todos only)
 	fastify.get("/", async (request, reply) => {
 		const queryResult = getTodosQuerySchema.safeParse(request.query);
@@ -68,7 +136,7 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 			return reply.status(400).send({
 				success: false,
 				error: "Invalid query parameters",
-				details: queryResult.error.flatten().fieldErrors,
+				details: z.flattenError(queryResult.error),
 			});
 		}
 
@@ -229,6 +297,7 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 	});
 
 	// PATCH /api/todos/:id - Partial Update (must belong to requester)
+	// PATCH /api/todos/:id - Partial Update (must belong to requester)
 	fastify.patch("/:id", async (request, reply) => {
 		const paramResult = todoIdParamSchema.safeParse(request.params);
 		if (!paramResult.success) {
@@ -256,27 +325,59 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 		if (mismatch) return mismatch;
 
 		try {
-			// updateMany + ownership filter so this silently no-ops instead of
-			// updating a row that isn't yours, then we check the count.
-			const result = await prisma.todo.updateMany({
+			// Fetch the existing todo first to preserve properties (like priority) if they aren't explicitly passed
+			const existingTodo = await prisma.todo.findFirst({
 				where: { id, userId, deletedAt: null },
-				data: {
-					...bodyData,
-					userId: undefined, // never write a client-supplied userId to the row
-					completedAt:
-						bodyData.status === "COMPLETED"
-							? new Date()
-							: bodyData.status
-								? null
-								: undefined,
-				},
 			});
 
-			if (result.count === 0) {
+			if (!existingTodo) {
 				return reply.status(404).send({ success: false, message: "Not found" });
 			}
 
-			const updated = await prisma.todo.findFirst({ where: { id, userId } });
+			// Determine correct completedAt timestamp behavior
+			let completedAt = existingTodo.completedAt;
+			if (bodyData.status) {
+				if (
+					bodyData.status === "COMPLETED" &&
+					existingTodo.status !== "COMPLETED"
+				) {
+					completedAt = new Date();
+				} else if (bodyData.status !== "COMPLETED") {
+					completedAt = null;
+				}
+			}
+
+			console.log("hello", bodyData.priority);
+
+			// Perform the update while explicitly retaining existing properties if not provided in bodyData
+			const updated = await prisma.todo.update({
+				where: { id },
+				data: {
+					title: bodyData.title ?? existingTodo.title,
+					description:
+						bodyData.description !== undefined
+							? bodyData.description
+							: existingTodo.description,
+					status: bodyData.status ?? existingTodo.status,
+					priority: bodyData.priority ?? existingTodo.priority, // Preserves existing priority instead of overriding
+					reorderIndex: bodyData.reorderIndex ?? existingTodo.reorderIndex,
+					isPinned: bodyData.isPinned ?? existingTodo.isPinned,
+					dueDate:
+						bodyData.dueDate !== undefined
+							? bodyData.dueDate
+							: existingTodo.dueDate,
+					reminderAt:
+						bodyData.reminderAt !== undefined
+							? bodyData.reminderAt
+							: existingTodo.reminderAt,
+					estimatedMinutes:
+						bodyData.estimatedMinutes !== undefined
+							? bodyData.estimatedMinutes
+							: existingTodo.estimatedMinutes,
+					completedAt,
+				},
+			});
+
 			return reply.send({ success: true, data: updated });
 		} catch (error) {
 			request.log.error(error, "Failed to update todo");
