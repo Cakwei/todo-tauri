@@ -5,6 +5,7 @@ if (existsSync(".env")) {
 }
 export const CORSList = [
 	process.env.BETTER_AUTH_URL || "",
+	"http://localhost:3000",
 	"tauri://localhost",
 	"http://tauri.localhost",
 	"https://tauri.localhost",

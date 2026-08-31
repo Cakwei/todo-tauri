@@ -44,7 +44,7 @@ function Login() {
 					password: password,
 				},
 				{
-					onSuccess: () => {
+					onSuccess: async () => {
 						window.location.href = "/dashboard";
 					},
 					onError: (ctx) => {
