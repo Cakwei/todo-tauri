@@ -1,3 +1,4 @@
+import { Store } from "@tauri-apps/plugin-store";
 import Axios from "axios";
 import type { ClassValue } from "clsx";
 import { clsx } from "clsx";
@@ -13,8 +14,10 @@ export const axios = Axios.create({
 });
 
 axios.interceptors.request.use(
-	(config) => {
-		const token = localStorage.getItem("better-auth.session_token");
+	async (config) => {
+		const store = await Store.load("app-settings.json");
+		const token = await store.get("better-auth.session_token");
+
 		if (token) {
 			config.headers.Authorization = `Bearer ${token}`;
 		}

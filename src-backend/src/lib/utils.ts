@@ -11,7 +11,7 @@ export async function requireAuth(
 	reply: FastifyReply,
 ) {
 	try {
-		const fetchHeaders = new Headers();
+		/*	const fetchHeaders = new Headers();
 
 		for (const [key, value] of Object.entries(request.headers)) {
 			if (value !== undefined) {
@@ -25,15 +25,17 @@ export async function requireAuth(
 					fetchHeaders.append(key, value);
 				}
 			}
-		}
-		console.log("Final header", fetchHeaders);
-		// 2. Pass the standard Fetch headers object
+		}*/
+
+		// console.log("Final header", fetchHeaders);
+
+		const token = request.headers.authorization?.split(" ")[1] || "";
+		// Pass the standard Fetch headers object
 		const session = await auth.api.getSession({
-			headers: fetchHeaders,
+			headers: { Authorization: `Bearer ${token}` },
 		});
 
-		// console.log(session);
-
+		// console.log("falg", session, token);
 		if (!session?.user?.id) {
 			return reply
 				.status(401)

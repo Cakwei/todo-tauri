@@ -1253,7 +1253,8 @@ function SidebarContent({
 											onSuccess: async () => {
 												const store = await Store.load("app-settings.json");
 												await store.delete("better-auth.session_token");
-
+												await store.save();
+												
 												window.location.href = "/login";
 											},
 										},

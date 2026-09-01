@@ -34,7 +34,8 @@ export const Route = createFileRoute("/__routes")({
 		const isFirstTime = store
 			? ((await store.get<boolean>("isFirstTime")) ?? true)
 			: true;
-		console.log("test", { token, isFirstTime });
+
+		// console.log("test", { token, isFirstTime });
 
 		if (isFirstTime && !session && location.pathname !== "/") {
 			throw redirect({
