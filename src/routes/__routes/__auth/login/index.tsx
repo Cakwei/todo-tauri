@@ -44,7 +44,12 @@ function Login() {
 					password: password,
 				},
 				{
-					onSuccess: async () => {
+					onSuccess: async (ctx) => {
+						const token = ctx.response.headers.get("set-auth-token") || ""; // get the token from the response headers
+						if (token) {
+							localStorage.setItem("better-auth.session_token", token);
+						}
+
 						window.location.href = "/dashboard";
 					},
 					onError: (ctx) => {

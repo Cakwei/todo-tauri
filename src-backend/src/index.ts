@@ -39,6 +39,7 @@ await server.register(cors, {
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
 	allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
 	credentials: true,
+	exposedHeaders: ["set-auth-token"],
 	maxAge: 86400,
 });
 

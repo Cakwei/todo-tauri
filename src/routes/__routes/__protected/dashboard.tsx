@@ -6,7 +6,7 @@ import {
 	useMutation,
 	useQuery,
 } from "@tanstack/react-query";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { invoke } from "@tauri-apps/api/core";
 import { isAxiosError } from "axios";
 import {
@@ -231,7 +231,7 @@ async function fetchTodosApi({
 async function fetchProjectsApi() {
 	try {
 		const response = await axios.get("/projects");
-		console.log(response.data, "fah");
+		//	console.log(response.data, "fah");
 		return response.data || [];
 	} catch (e) {
 		console.error("fetchProjectsApi", e);
