@@ -1,4 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { Store } from "@tauri-apps/plugin-store";
 import {
 	AlertCircle,
 	ArrowLeft,
@@ -47,9 +48,10 @@ function Login() {
 					onSuccess: async (ctx) => {
 						const token = ctx.response.headers.get("set-auth-token") || ""; // get the token from the response headers
 						if (token) {
-							localStorage.setItem("better-auth.session_token", token);
+							const store = await Store.load("app-settings.json");
+							await store.set("better-auth.session_token", token);
+							await store.save();
 						}
-
 						window.location.href = "/dashboard";
 					},
 					onError: (ctx) => {

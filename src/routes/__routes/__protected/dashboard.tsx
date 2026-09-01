@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { invoke } from "@tauri-apps/api/core";
+import { Store } from "@tauri-apps/plugin-store";
 import { isAxiosError } from "axios";
 import {
 	CalendarDays,
@@ -34,7 +35,6 @@ import {
 } from "lucide-react";
 import { type ReactNode, useRef, useState } from "react";
 import { z } from "zod";
-
 import { axios } from "#/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -712,6 +712,14 @@ function Dashboard() {
 						</div>
 
 						<Button
+							onClick={async () => {
+								const store = await Store.load("app-settings.json");
+
+								console.log(
+									"yes",
+									await store.get("better-auth.session_token"),
+								);
+							}}
 							variant="outline"
 							size="sm"
 							className="hidden shrink-0 gap-2 sm:inline-flex"
@@ -1235,7 +1243,10 @@ function SidebarContent({
 								onClick={() =>
 									authClient.signOut({
 										fetchOptions: {
-											onSuccess: () => {
+											onSuccess: async () => {
+												const store = await Store.load("app-settings.json");
+												await store.delete("better-auth.session_token");
+
 												window.location.href = "/login";
 											},
 										},

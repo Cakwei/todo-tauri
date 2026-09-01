@@ -1,32 +1,36 @@
 /** biome-ignore-all lint/suspicious/noArrayIndexKey: <explanation> */
-import {
-	createFileRoute,
-	isRedirect,
-	redirect,
-	useNavigate,
-} from "@tanstack/react-router";
-import { appDataDir } from "@tauri-apps/api/path";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Store } from "@tauri-apps/plugin-store";
 import { ArrowRight, CheckCircle2, FolderKanban, ListTodo } from "lucide-react";
 import { useState } from "react";
 import { Button } from "#/components/ui/button";
-import { authClient } from "#/lib/auth-client";
 
 export const Route = createFileRoute("/__routes/")({
 	component: LaunchScreen,
-	beforeLoad: async ({ location }) => {
+	/*beforeLoad: async ({ location }) => {
 		try {
 			// Fetch Session
-			const session = (await authClient.getSession()).data;
+			const store = await Store.load("app-settings.json");
+			const token = await store.get("better-auth.session_token");
+
+			const session = (
+				await authClient.getSession({
+					fetchOptions: {
+						headers: {
+							authorization: `Bearer ${token}`,
+						},
+					},
+				})
+			).data;
 			// const appDataPath = await appDataDir();
 
 			// console.log("/boom", appDataPath);
 
 			// Reads from Tauri Store
-			const store = await Store.load("app-settings.json");
 			const isFirstTime = (await store.get<boolean>("isFirstTime")) ?? true;
 
 			// 3Redirect returning users to dashboard if not already there
+			console.log("firstime", isFirstTime);
 			if (!isFirstTime && !location.pathname.startsWith("/dashboard")) {
 				throw redirect({
 					to: "/dashboard",
@@ -46,7 +50,7 @@ export const Route = createFileRoute("/__routes/")({
 			console.error("RootDocument Error @", e);
 			return { session: null, isFirstTime: true };
 		}
-	},
+	},*/
 });
 
 const SLIDES = [
