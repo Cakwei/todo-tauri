@@ -993,6 +993,13 @@ function Dashboard() {
 								</div>
 							</Card>
 						</div>
+						<div className="w-full flex justify-center">
+							{" "}
+							<Label className="text-xs text-(--text-secondary)">
+								Built with<span className="text-(--link)">Tanstack Start</span>&
+								<span className="text-(--link)">Tauri</span>
+							</Label>
+						</div>
 					</main>
 				</div>
 			</Sheet>
