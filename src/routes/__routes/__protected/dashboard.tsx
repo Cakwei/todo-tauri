@@ -278,8 +278,19 @@ function Dashboard() {
 		},
 	);
 
-	const { data: sessionData } = authClient.useSession();
-	const currentUser = sessionData?.user;
+	// Auth-related
+	/*const token = await Store.get("better-auth.session_token");
+
+	const { data: sessionData } = await authClient.getSession({
+		fetchOptions: {
+			headers: {
+				authorization: `Bearer ${token}`
+			},
+		},
+	});*/
+	const { session } = Route.useRouteContext();
+
+	const currentUser = session?.user;
 
 	const updateSearchParams = async (params: Partial<TodoSearchParams>) => {
 		navigate({
@@ -1233,6 +1244,7 @@ function SidebarContent({
 								color: "var(--text-secondary)",
 							}}
 						>
+							{console.log("test", currentUser)}
 							{currentUser?.email || "user@dev.io"}
 						</p>
 					</div>
@@ -1254,7 +1266,7 @@ function SidebarContent({
 												const store = await Store.load("app-settings.json");
 												await store.delete("better-auth.session_token");
 												await store.save();
-												
+
 												window.location.href = "/login";
 											},
 										},
