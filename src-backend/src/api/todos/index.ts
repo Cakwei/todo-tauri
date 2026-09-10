@@ -1,6 +1,7 @@
 /** biome-ignore-all lint/suspicious/useIterableCallbackReturn: <explanation> */
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { TodoWhereInput } from "@/generated/prisma/models";
 import { prisma } from "../../db";
 import { requireAuth } from "../../lib/utils";
 
@@ -149,7 +150,7 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 		{
 			config: {
 				rateLimit: {
-					max: 60,
+					max: 30,
 					timeWindow: "1 minute",
 					keyGenerator: (request) => {
 						const userId = request.user?.id ?? "anonymous";
@@ -170,17 +171,18 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 			}
 
 			const { page, limit, search, status, projectId } = queryResult.data;
+
 			const skip = (page - 1) * limit;
 
-			const whereCondition: any = {
+			const whereCondition: TodoWhereInput = {
 				deletedAt: null,
 				userId: request.user?.id,
 			};
 
 			if (search) {
 				whereCondition.OR = [
-					{ title: { contains: search, mode: "insensitive" } },
-					{ description: { contains: search, mode: "insensitive" } },
+					{ title: { contains: search } },
+					{ description: { contains: search } },
 				];
 			}
 			if (status) whereCondition.status = status;
@@ -197,7 +199,6 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 					}),
 					prisma.todo.count({ where: whereCondition }),
 				]);
-
 				return reply.send({
 					success: true,
 					data: todos,
@@ -266,7 +267,7 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 		{
 			config: {
 				rateLimit: {
-					max: 60,
+					max: 30,
 					timeWindow: "1 minute",
 					keyGenerator: (request) => {
 						const userId = request.user?.id ?? "anonymous";
@@ -476,7 +477,7 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 		{
 			config: {
 				rateLimit: {
-					max: 20,
+					max: 10,
 					timeWindow: "1 minute",
 					keyGenerator: (request) => {
 						const userId = request.user?.id ?? "anonymous";

@@ -25,6 +25,7 @@ import {
 	Menu,
 	MoreHorizontal,
 	Paperclip,
+	Pencil,
 	Pin,
 	Plus,
 	Search,
@@ -35,6 +36,12 @@ import {
 } from "lucide-react";
 import { type ReactNode, useRef, useState } from "react";
 import { z } from "zod";
+import { Calendar } from "#/components/ui/calendar";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "#/components/ui/popover";
 import { axios } from "#/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -310,12 +317,8 @@ function Dashboard() {
 		data: todosRes,
 		isPending,
 		isPlaceholderData,
-		isFetching,
 	} = useQuery({
 		...fetchTodoQueryOptions({ page, limit, search, tab, projectId }),
-		// Don't let the automatic poll race the optimistic reorder update —
-		// it can win the race against the mutation's own refetch and briefly
-		// flash the pre-drag order back onto the screen.
 		refetchInterval: isReordering ? false : 5000,
 	});
 
@@ -438,9 +441,9 @@ function Dashboard() {
 				});
 			}
 			// Only force a refetch to resync with the server when something
-			// actually went wrong — on success the optimistic state above
+			// actually went wrong, on success the optimistic state above
 			// already matches what was persisted, so refetching immediately
-			// would just cause a pointless flash.
+			// would just cause a pointless flash
 			queryClient.invalidateQueries({ queryKey: ["todos"] });
 		},
 	});
@@ -721,8 +724,8 @@ function Dashboard() {
 								)}
 							</div>
 						</div>
-
-						<Button
+						{/* 
+<Button
 							onClick={async () => {
 								const store = await Store.load("app-settings.json");
 
@@ -742,6 +745,7 @@ function Dashboard() {
 							<SlidersHorizontal className="h-3.5 w-3.5" />
 							<span>Filter</span>
 						</Button>
+*/}
 
 						<Button
 							size="sm"
@@ -1005,11 +1009,16 @@ function Dashboard() {
 							</Card>
 						</div>
 						<div className="w-full flex justify-center">
-							{" "}
-							<Label className="text-xs text-(--text-secondary)">
-								Built with<span className="text-(--link)">Tanstack Start</span>&
+							<span
+								className="text-xs"
+								style={{ color: "var(--text-secondary)" }}
+							>
+								Built using{" "}
+								<span className="text-(--link)">Tanstack Start</span> &{" "}
 								<span className="text-(--link)">Tauri</span>
-							</Label>
+								{". By "}
+								<span className="text-(--link)">Charlee</span>.
+							</span>
 						</div>
 					</main>
 				</div>
@@ -1151,7 +1160,7 @@ function SidebarContent({
 							No projects yet
 						</p>
 					) : (
-						<div className="space-y-0.5 hover:bg-(--bg)">
+						<div className="space-y-0.5 hover:bg-(--bg) rounded-sm">
 							{projects.map((project) => {
 								const active = searchParams.projectId === project.id;
 								return (
@@ -1165,7 +1174,7 @@ function SidebarContent({
 												page: 1,
 											})
 										}
-										className="flex w-full min-w-0 items-center gap-2.5 rounded-sm px-2.5 py-2 text-left text-xs transition-colors"
+										className="flex w-full min-w-0 items-center gap-2.5 rounded-sm p-2.5 h-[36px] text-left text-xs transition-colors"
 										style={{
 											backgroundColor: active ? "var(--link)" : "",
 											color: "var(--text)",
@@ -1244,7 +1253,6 @@ function SidebarContent({
 								color: "var(--text-secondary)",
 							}}
 						>
-							{console.log("test", currentUser)}
 							{currentUser?.email || "user@dev.io"}
 						</p>
 					</div>
@@ -1346,27 +1354,27 @@ function TodoRow({
 	onToggle,
 	onUpdateTodo,
 	dragHandleProps,
-}: {
-	todo: Todo;
-	onToggle: () => void;
-	onUpdateTodo: (payload: {
-		title?: string;
-		description?: string | null;
-		priority?: Todo["priority"];
-	}) => void;
-	dragHandleProps?: any;
-}) {
+}: TodoRowProps) {
 	const completed = todo.status === "COMPLETED";
 
 	const [isEditingTitle, setIsEditingTitle] = useState(false);
 	const [isEditingDesc, setIsEditingDesc] = useState(false);
+	const [isEditingDueDate, setIsEditingDueDate] = useState(false);
+
+	// State to control the comprehensive Edit Modal dialog
+	const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
+	const [modalTitle, setModalTitle] = useState(todo.title);
+	const [modalDesc, setModalDesc] = useState(todo.description ?? "");
+	const [modalPriority, setModalPriority] = useState(todo.priority);
+	const [modalDueDate, setModalDueDate] = useState<Date | null>(
+		todo.dueDate ? new Date(todo.dueDate) : null,
+	);
 
 	const titleRef = useRef<HTMLInputElement>(null);
 	const descRef = useRef<HTMLTextAreaElement>(null);
 
 	const handleSaveTitle = () => {
 		const newTitle = titleRef.current?.value.trim();
-
 		if (newTitle && newTitle !== todo.title) {
 			onUpdateTodo({ title: newTitle });
 		}
@@ -1399,175 +1407,321 @@ function TodoRow({
 		}
 	};
 
-	return (
-		<div
-			className={`group relative border-b py-3.5 px-3 transition-colors sm:px-5 last:border-b-0 ${
-				completed ? "opacity-60" : ""
-			}`}
-			style={{ borderColor: "var(--border)" }}
-		>
-			<div className="flex min-w-0 items-start gap-2.5 sm:gap-3">
-				<div
-					className="hidden pt-1 sm:block cursor-grab active:cursor-grabbing"
-					{...dragHandleProps}
-				>
-					<GripVertical
-						className="h-4 w-4 opacity-40 transition-opacity group-hover:opacity-100"
-						style={{ color: "var(--text-secondary)" }}
-					/>
-				</div>
+	const handleSaveModal = () => {
+		onUpdateTodo({
+			title: modalTitle.trim() || todo.title,
+			description: modalDesc.trim() || null,
+			priority: modalPriority,
+			dueDate: modalDueDate,
+		});
+		setIsDetailsModalOpen(false);
+	};
 
-				<Button
-					variant="ghost"
-					size="icon"
-					className="mt-0.5 h-6 w-6 shrink-0 rounded-full p-0"
-					onClick={onToggle}
-					aria-label={completed ? "Mark task incomplete" : "Mark task complete"}
-				>
-					{completed ? (
-						<CheckCircle2 className="h-5 w-5 text-emerald-500" />
-					) : (
-						<Circle
-							className="h-5 w-5"
+	return (
+		<>
+			<div
+				className={`group relative border-b py-3.5 px-3 transition-colors sm:px-5 last:border-b-0 ${
+					completed ? "opacity-60" : ""
+				}`}
+				style={{ borderColor: "var(--border)" }}
+			>
+				<div className="flex min-w-0 items-start gap-2.5 sm:gap-3">
+					<div
+						className="hidden pt-1 sm:block cursor-grab active:cursor-grabbing"
+						{...dragHandleProps}
+					>
+						<GripVertical
+							className="h-4 w-4 opacity-40 transition-opacity group-hover:opacity-100"
 							style={{ color: "var(--text-secondary)" }}
 						/>
-					)}
-				</Button>
+					</div>
 
-				<div className="min-w-0 flex-1">
-					<div className="flex min-w-0 items-center gap-2">
-						{todo.isPinned && (
-							<Pin className="mt-0.5 h-3.5 w-3.5 shrink-0 rotate-45 text-amber-500" />
-						)}
-
-						{isEditingTitle ? (
-							<Input
-								ref={titleRef}
-								autoFocus
-								defaultValue={todo.title}
-								maxLength={TITLE_MAX_LENGTH}
-								onBlur={handleSaveTitle}
-								onKeyDown={handleTitleKeyDown}
-								className="h-auto w-full rounded-none border-0 border-b border-blue-500 bg-transparent px-0 py-0 text-sm font-medium leading-5 shadow-none focus-visible:ring-0"
-								style={{ color: "var(--text)" }}
-							/>
+					<Button
+						variant="ghost"
+						size="icon"
+						className="mt-0.5 h-6 w-6 shrink-0 rounded-full p-0"
+						onClick={onToggle}
+						aria-label={
+							completed ? "Mark task incomplete" : "Mark task complete"
+						}
+					>
+						{completed ? (
+							<CheckCircle2 className="h-5 w-5 text-emerald-500" />
 						) : (
-							<h3
-								onDoubleClick={() => !completed && setIsEditingTitle(true)}
-								title="Double-click to edit title"
-								className={`min-w-0 flex-1 select-none text-sm font-medium leading-5 transition-colors sm:text-sm ${
-									completed
-										? "line-through"
-										: "cursor-pointer hover:text-blue-500"
-								}`}
-								style={{
-									color: completed ? "var(--text-secondary)" : "var(--text)",
-								}}
-							>
-								{todo.title}
-							</h3>
-						)}
-					</div>
-
-					<div className="mt-1">
-						{isEditingDesc ? (
-							<Textarea
-								ref={descRef}
-								autoFocus
-								rows={1}
-								defaultValue={todo.description ?? ""}
-								maxLength={DESCRIPTION_MAX_LENGTH}
-								onBlur={handleSaveDesc}
-								onKeyDown={handleDescKeyDown}
-								className="min-h-0 w-full resize-none rounded-none border-0 border-b border-blue-500 bg-transparent px-0 py-0 text-sm shadow-none focus-visible:ring-0"
-								style={{ color: "var(--text)" }}
+							<Circle
+								className="h-5 w-5"
+								style={{ color: "var(--text-secondary)" }}
 							/>
-						) : (
-							<p
-								onDoubleClick={() => !completed && setIsEditingDesc(true)}
-								title="Double-click to edit description"
-								className={`line-clamp-2 select-none text-sm transition-colors ${
-									completed ? "" : "cursor-pointer hover:text-blue-500"
-								}`}
-								style={{ color: "var(--text-secondary)" }}
-							>
-								{todo.description || (
-									<span className="italic opacity-40">
-										Double-click to add a description...
-									</span>
-								)}
-							</p>
 						)}
+					</Button>
+
+					<div className="min-w-0 flex-1">
+						<div className="flex min-w-0 items-center gap-2">
+							{todo.isPinned && (
+								<Pin className="mt-0.5 h-3.5 w-3.5 shrink-0 rotate-45 text-amber-500" />
+							)}
+
+							{isEditingTitle ? (
+								<Input
+									ref={titleRef}
+									autoFocus
+									defaultValue={todo.title}
+									maxLength={TITLE_MAX_LENGTH}
+									onBlur={handleSaveTitle}
+									onKeyDown={handleTitleKeyDown}
+									className="h-auto w-full rounded-none border-0 border-b border-blue-500 bg-(--bg) dark:bg-(--bg) px-0 py-0 text-sm font-medium leading-5 shadow-none focus-visible:ring-0"
+									style={{ color: "var(--text)" }}
+								/>
+							) : (
+								<Label
+									onClick={() => !completed && setIsEditingTitle(true)}
+									title="Double-click to edit title"
+									className={`min-w-0 flex-1 select-none text-sm font-medium leading-5 transition-colors sm:text-sm ${
+										completed
+											? "line-through"
+											: "cursor-pointer hover:text-blue-500"
+									}`}
+									style={{
+										color: completed ? "var(--text-secondary)" : "var(--text)",
+									}}
+								>
+									{todo.title}
+								</Label>
+							)}
+						</div>
+
+						<div className="mt-1">
+							{isEditingDesc ? (
+								<Textarea
+									ref={descRef}
+									autoFocus
+									rows={1}
+									defaultValue={todo.description ?? ""}
+									maxLength={DESCRIPTION_MAX_LENGTH}
+									onBlur={handleSaveDesc}
+									onKeyDown={handleDescKeyDown}
+									className="min-h-0 w-full resize-none rounded-none border-0 border-b border-blue-500 bg-(--bg) dark:bg-(--bg) px-0 py-0 text-sm shadow-none focus-visible:ring-0"
+									style={{ color: "var(--text)" }}
+								/>
+							) : (
+								<Label
+									onClick={() => !completed && setIsEditingDesc(true)}
+									title="Double-click to edit description"
+									className={`line-clamp-2 select-none text-sm transition-colors ${
+										completed ? "" : "cursor-pointer hover:text-blue-500"
+									}`}
+									style={{ color: "var(--text-secondary)" }}
+								>
+									{todo.description || (
+										<span className="italic opacity-40">
+											Double-click to add a description...
+										</span>
+									)}
+								</Label>
+							)}
+						</div>
+
+						<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+							{todo.project?.name && (
+								<span
+									className="flex min-w-0 max-w-[180px] items-center gap-1 text-[10px] font-medium"
+									style={{ color: "var(--text-secondary)" }}
+								>
+									<Folder className="h-3 w-3 shrink-0" />
+									<span className="truncate">{todo.project.name}</span>
+								</span>
+							)}
+
+							{todo.dueDate && (
+								<Popover
+									open={isEditingDueDate}
+									onOpenChange={setIsEditingDueDate}
+								>
+									<PopoverTrigger asChild>
+										<Label
+											onDoubleClick={() =>
+												!completed && setIsEditingDueDate(true)
+											}
+											title="Double-click to change due date"
+											className={`flex items-center gap-1 text-[10px] transition-colors select-none ${
+												completed ? "" : "cursor-pointer hover:text-blue-500"
+											}`}
+											style={{ color: "var(--text-secondary)" }}
+										>
+											<CalendarDays className="h-3 w-3" />
+											{formatDate(todo.dueDate)}
+										</Label>
+									</PopoverTrigger>
+									<PopoverContent
+										className="w-auto p-0 shadow-lg"
+										align="start"
+										style={{
+											backgroundColor: "var(--bg-secondary)",
+											borderColor: "var(--border)",
+										}}
+									>
+										<Calendar
+											mode="single"
+											selected={
+												todo.dueDate ? new Date(todo.dueDate) : undefined
+											}
+											onSelect={(date) => {
+												onUpdateTodo({ dueDate: date ?? null });
+												setIsEditingDueDate(false);
+											}}
+											className="rounded-md border p-3"
+											style={{
+												backgroundColor: "var(--bg-secondary)",
+												color: "var(--text)",
+											}}
+										/>
+									</PopoverContent>
+								</Popover>
+							)}
+
+							{todo.children && todo.children.length > 0 && (
+								<span
+									className="flex items-center gap-1 text-[10px]"
+									style={{ color: "var(--text-secondary)" }}
+								>
+									<CheckSquare className="h-3 w-3" />
+									{todo.children.length} subtasks
+								</span>
+							)}
+
+							{todo.attachments && todo.attachments.length > 0 && (
+								<span
+									className="flex items-center gap-1 text-[10px]"
+									style={{ color: "var(--text-secondary)" }}
+								>
+									<Paperclip className="h-3 w-3" />
+									{todo.attachments.length}
+								</span>
+							)}
+						</div>
+
+						<div className="mt-2.5 flex flex-wrap gap-1.5 lg:hidden">
+							<PriorityMenu
+								priority={todo.priority}
+								disabled={completed}
+								onChange={(priority) => onUpdateTodo({ priority })}
+							/>
+							<StatusBadge status={todo.status} />
+							{todo.tags?.slice(0, 2).map((item) => (
+								<TagBadge key={item.tagId} name={item.tag?.name} />
+							))}
+						</div>
 					</div>
 
-					<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-						{todo.project?.name && (
-							<span
-								className="flex min-w-0 max-w-[180px] items-center gap-1 text-[10px] font-medium"
-								style={{ color: "var(--text-secondary)" }}
-							>
-								<Folder className="h-3 w-3 shrink-0" />
-								<span className="truncate">{todo.project.name}</span>
-							</span>
-						)}
-
-						{todo.dueDate && (
-							<span
-								className="flex items-center gap-1 text-[10px]"
-								style={{ color: "var(--text-secondary)" }}
-							>
-								<CalendarDays className="h-3 w-3" />
-								{formatDate(todo.dueDate)}
-							</span>
-						)}
-
-						{todo.children && todo.children.length > 0 && (
-							<span
-								className="flex items-center gap-1 text-[10px]"
-								style={{ color: "var(--text-secondary)" }}
-							>
-								<CheckSquare className="h-3 w-3" />
-								{todo.children.length} subtasks
-							</span>
-						)}
-
-						{todo.attachments && todo.attachments.length > 0 && (
-							<span
-								className="flex items-center gap-1 text-[10px]"
-								style={{ color: "var(--text-secondary)" }}
-							>
-								<Paperclip className="h-3 w-3" />
-								{todo.attachments.length}
-							</span>
-						)}
-					</div>
-
-					<div className="mt-2.5 flex flex-wrap gap-1.5 lg:hidden">
+					<div className="hidden shrink-0 items-center gap-1.5 lg:flex">
+						{todo.tags
+							?.slice(0, 3)
+							.map((item: { tagId: string; tag: { name: string } }) => (
+								<TagBadge key={item.tagId} name={item.tag?.name} />
+							))}
 						<PriorityMenu
 							priority={todo.priority}
 							disabled={completed}
 							onChange={(priority) => onUpdateTodo({ priority })}
 						/>
 						<StatusBadge status={todo.status} />
-						{todo.tags?.slice(0, 2).map((item) => (
-							<TagBadge key={item.tagId} name={item.tag?.name} />
-						))}
+
+						{/* Edit Button on the right side */}
+						<Button
+							variant="ghost"
+							size="icon"
+							className="h-8 w-8 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+							onClick={() => {
+								setModalTitle(todo.title);
+								setModalDesc(todo.description ?? "");
+								setModalPriority(todo.priority);
+								setModalDueDate(todo.dueDate ? new Date(todo.dueDate) : null);
+								setIsDetailsModalOpen(true);
+							}}
+							title="Edit task details"
+						>
+							<Pencil className="h-4 w-4" />
+						</Button>
 					</div>
 				</div>
-
-				<div className="hidden shrink-0 items-center gap-1.5 lg:flex">
-					{todo.tags?.slice(0, 3).map((item) => (
-						<TagBadge key={item.tagId} name={item.tag?.name} />
-					))}
-					<PriorityMenu
-						priority={todo.priority}
-						disabled={completed}
-						onChange={(priority) => onUpdateTodo({ priority })}
-					/>
-					<StatusBadge status={todo.status} />
-				</div>
 			</div>
-		</div>
+
+			{/* Comprehensive Edit Modal Dialog */}
+			<Dialog open={isDetailsModalOpen} onOpenChange={setIsDetailsModalOpen}>
+				<DialogContent
+					className="sm:max-w-[425px]"
+					style={{
+						backgroundColor: "var(--bg-secondary)",
+						color: "var(--text)",
+					}}
+				>
+					<DialogHeader>
+						<DialogTitle>Edit Todo Details</DialogTitle>
+					</DialogHeader>
+					<div className="grid gap-4 py-4">
+						<div className="grid gap-2">
+							<Label
+								className="text-xs font-medium"
+								style={{ color: "var(--text-secondary)" }}
+							>
+								Title
+							</Label>
+							<Input
+								className="bg-(--bg) dark:bg-(--bg)"
+								value={modalTitle}
+								onChange={(e) => setModalTitle(e.target.value)}
+								maxLength={TITLE_MAX_LENGTH}
+							/>
+						</div>
+						<div className="grid gap-2">
+							<Label
+								className="text-xs font-medium"
+								style={{ color: "var(--text-secondary)" }}
+							>
+								Description
+							</Label>
+							<Textarea
+								value={modalDesc}
+								onChange={(e) => setModalDesc(e.target.value)}
+								maxLength={DESCRIPTION_MAX_LENGTH}
+								className="bg-(--bg) dark:bg-(--bg)"
+								rows={3}
+							/>
+						</div>
+						<div className="grid gap-2">
+							<Label
+								className="text-xs font-medium"
+								style={{ color: "var(--text-secondary)" }}
+							>
+								Due Date
+							</Label>
+							<Calendar
+								mode="single"
+								selected={modalDueDate ?? undefined}
+								onSelect={(date) => setModalDueDate(date ?? null)}
+								className="rounded-md border p-3 w-full"
+								style={{ backgroundColor: "var(--bg-secondary)" }}
+							/>
+						</div>
+					</div>
+					<DialogFooter>
+						<Button
+							variant="outline"
+							onClick={() => setIsDetailsModalOpen(false)}
+						>
+							Cancel
+						</Button>
+						<Button
+							onClick={handleSaveModal}
+							style={{ backgroundColor: "var(--link)", color: "#ffffff" }}
+							className="hover:opacity-90"
+						>
+							Save Changes
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		</>
 	);
 }
 
@@ -1762,6 +1916,7 @@ function EmptyState({
 	search: boolean;
 	onCreate: () => void;
 }) {
+	//console.log(search)
 	return (
 		<div className="flex flex-col items-center justify-center px-6 py-16 text-center">
 			<div

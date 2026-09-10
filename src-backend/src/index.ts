@@ -4,7 +4,8 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import redis from "@fastify/redis";
 import Fastify from "fastify";
-import { authRoutes } from "./api/auth";
+import { authRoutes } from "./api/auth/auth";
+import { healthRoutes } from "./api/health";
 import { projectRoutes } from "./api/projects/index";
 import { tagRoutes } from "./api/tags/index";
 import { todoRoutes } from "./api/todos/index";
@@ -27,12 +28,13 @@ await server.register(redis, {
 });
 
 // Rate-limit
-await server.register(rateLimit, {
-	max: 15,
-	timeWindow: "1 minute",
-	redis: server.redis,
-});
-
+if (process.env.NODE_ENV === "production") {
+	await server.register(rateLimit, {
+		max: 15,
+		timeWindow: "1 minute",
+		redis: server.redis,
+	});
+}
 // CORS Settings
 await server.register(cors, {
 	origin: CORSList,
@@ -51,6 +53,7 @@ await server.register(authRoutes);
 await server.register(todoRoutes, { prefix: "/api/todos" });
 await server.register(projectRoutes, { prefix: "/api/projects" });
 await server.register(tagRoutes, { prefix: "/api/tags" });
+await server.register(healthRoutes, { prefix: "/api/health" });
 
 // Init
 try {

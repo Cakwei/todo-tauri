@@ -1,7 +1,7 @@
 /** biome-ignore-all lint/suspicious/useIterableCallbackReturn: <explanation> */
 import { fromNodeHeaders } from "better-auth/node";
 import type { FastifyPluginAsync } from "fastify";
-import { auth } from "../lib/auth";
+import { auth } from "../../lib/auth";
 
 export const authRoutes: FastifyPluginAsync = async (fastify) => {
 	fastify.route({
