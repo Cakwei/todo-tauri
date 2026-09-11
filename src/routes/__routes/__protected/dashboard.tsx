@@ -83,7 +83,6 @@ import {
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
-import { TodoStatus } from "../../../../src-backend/src/generated/prisma/enums";
 
 type Project = {
 	id: string;
@@ -105,7 +104,7 @@ type Todo = {
 	id: string;
 	title: string;
 	description?: string | null;
-	status: TodoStatus;
+	status: "IN_PROGRESS" | "LATE" | "COMPLETED";
 	priority: "LOW" | "MEDIUM" | "HIGH" | "URGENT";
 	isPinned?: boolean;
 	dueDate?: string | null;
@@ -1970,7 +1969,7 @@ function CreateTaskDialog({
 
 		const result = createTodoSchema.safeParse({
 			title,
-			status: TodoStatus.IN_PROGRESS,
+			status: "IN_PROGRESS",
 			description: description.trim() ? description : undefined,
 			priority,
 			dueDate: finalDate || undefined,
