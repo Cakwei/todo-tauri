@@ -1,7 +1,8 @@
 /** biome-ignore-all lint/suspicious/useIterableCallbackReturn: <explanation> */
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { TodoWhereInput } from "@/generated/prisma/models";
+import type { TodoWhereInput } from "@/generated/prisma/models";
+import { logger } from "@/lib/const";
 import { prisma } from "../../db";
 import { requireAuth } from "../../lib/utils";
 
@@ -199,9 +200,38 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 					}),
 					prisma.todo.count({ where: whereCondition }),
 				]);
+
+				// ====
+				const now = new Date();
+
+				const processedTodos = await Promise.all(
+					todos.map(async (todo) => {
+						// Check if dueDate exists and status is IN_PROGRESS
+						if (todo.dueDate && todo.status === "IN_PROGRESS") {
+							const dueDate = new Date(todo.dueDate);
+
+							if (dueDate < now) {
+								// Update the row in the DB
+								const updatedTodo = await prisma.todo.update({
+									where: { id: todo.id },
+									data: { status: "LATE" },
+								});
+
+								// Return the updated record
+								return updatedTodo;
+							}
+						}
+
+						// Return the original todo if no update was needed
+						return todo;
+					}),
+				);
+				// ====
+				console.log(processedTodos);
+
 				return reply.send({
 					success: true,
-					data: todos,
+					data: processedTodos,
 					message: "Fetched todos",
 					currentPage: page,
 					totalCount,
@@ -316,7 +346,10 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 		},
 		async (request, reply) => {
 			const bodyResult = createTodoSchema.safeParse(request.body);
+			console.log("yoyoyo", bodyResult, await request.body);
+
 			if (!bodyResult.success) {
+				logger.error(bodyResult.error);
 				return reply.status(400).send({
 					success: false,
 					error: "Invalid request payload",
@@ -477,7 +510,7 @@ export const todoRoutes: FastifyPluginAsync = async (fastify) => {
 		{
 			config: {
 				rateLimit: {
-					max: 10,
+					max: 20,
 					timeWindow: "1 minute",
 					keyGenerator: (request) => {
 						const userId = request.user?.id ?? "anonymous";

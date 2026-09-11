@@ -47,17 +47,22 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 			},
 		],
 	}),
-	component: RootDocument,
+	ssr: false,
+	shellComponent: RootShell,
+	component: RootComponent,
 });
+function RootComponent() {
+	return <Outlet />;
+}
 
-function RootDocument() {
+function RootShell({ children }: { children: React.ReactNode }) {
 	return (
 		<html lang="en">
 			<head>
 				<HeadContent />
 			</head>
 			<body className="dark">
-				<Outlet />
+				{children}
 				<TanStackDevtools
 					config={{
 						position: "bottom-right",

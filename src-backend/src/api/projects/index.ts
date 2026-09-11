@@ -11,7 +11,7 @@ export const projectRoutes: FastifyPluginAsync = async (fastify) => {
 		{
 			config: {
 				rateLimit: {
-					max: 15,
+					max: 30,
 					timeWindow: "1 minute",
 					keyGenerator: (request) => {
 						const userId = request.user?.id ?? "anonymous";

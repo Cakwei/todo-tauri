@@ -18,6 +18,7 @@ import {
 	ChevronLeft,
 	ChevronRight,
 	Circle,
+	Clock,
 	Clock3,
 	Folder,
 	GripVertical,
@@ -29,12 +30,17 @@ import {
 	Pin,
 	Plus,
 	Search,
-	SlidersHorizontal,
 	Tag as TagIcon,
 	TrendingUp,
 	X,
 } from "lucide-react";
-import { type ReactNode, useRef, useState } from "react";
+import {
+	type Dispatch,
+	type ReactNode,
+	type SetStateAction,
+	useRef,
+	useState,
+} from "react";
 import { z } from "zod";
 import { Calendar } from "#/components/ui/calendar";
 import {
@@ -42,6 +48,13 @@ import {
 	PopoverContent,
 	PopoverTrigger,
 } from "#/components/ui/popover";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "#/components/ui/select";
 import { axios } from "#/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -70,34 +83,29 @@ import {
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
+import { TodoStatus } from "../../../../src-backend/src/generated/prisma/enums";
 
-interface Project {
+type Project = {
 	id: string;
 	name: string;
 	color?: string;
-}
+};
 
-interface Tag {
+type Tag = {
 	id: string;
 	name: string;
-}
+};
 
-interface TodoTag {
+type TodoTag = {
 	tagId: string;
 	tag?: Tag;
-}
+};
 
-interface Todo {
+type Todo = {
 	id: string;
 	title: string;
 	description?: string | null;
-	status:
-		| "BACKLOG"
-		| "TODO"
-		| "IN_PROGRESS"
-		| "IN_REVIEW"
-		| "COMPLETED"
-		| "CANCELLED";
+	status: TodoStatus;
 	priority: "LOW" | "MEDIUM" | "HIGH" | "URGENT";
 	isPinned?: boolean;
 	dueDate?: string | null;
@@ -108,7 +116,7 @@ interface Todo {
 	tags?: TodoTag[];
 	children?: any[];
 	attachments?: any[];
-}
+};
 
 const TITLE_MAX_LENGTH = 255;
 const DESCRIPTION_MAX_LENGTH = 5000;
@@ -140,9 +148,29 @@ export const createTodoSchema = z.object({
 	status: todoStatusEnum.optional().default("TODO"),
 	priority: priorityEnum.optional().default("MEDIUM"),
 	projectId: z.string().optional().nullable(),
+	parentId: z.string().optional().nullable(),
 	dueDate: z.date().optional().nullable(),
 	estimatedMinutes: z.number().int().min(0).optional().nullable(),
 });
+
+type FormValues = z.infer<typeof createTodoSchema>;
+
+type CreateTaskDialogProps = {
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	error: string | null;
+	pending: boolean;
+	title: string;
+	description: string;
+	onTitleChange: Dispatch<SetStateAction<string>>;
+	onDescriptionChange: Dispatch<SetStateAction<string>>;
+	setNewTitle: Dispatch<SetStateAction<string>>;
+	onSubmit: (values: FormValues) => void;
+	onErrorClear: () => void;
+	projects?: { id: string; name: string }[];
+	defaultProjectId?: string;
+	defaultParentId?: string;
+};
 
 export const updateTodoStatusSchema = z.object({
 	id: z.string().min(1, "Todo ID is required"),
@@ -238,7 +266,6 @@ async function fetchTodosApi({
 async function fetchProjectsApi() {
 	try {
 		const response = await axios.get("/projects");
-		//	console.log(response.data, "fah");
 		return response.data || [];
 	} catch (e) {
 		console.error("fetchProjectsApi", e);
@@ -285,28 +312,15 @@ function Dashboard() {
 		},
 	);
 
-	// Auth-related
-	/*const token = await Store.get("better-auth.session_token");
-
-	const { data: sessionData } = await authClient.getSession({
-		fetchOptions: {
-			headers: {
-				authorization: `Bearer ${token}`
-			},
-		},
-	});*/
 	const { session } = Route.useRouteContext();
-
 	const currentUser = session?.user;
 
 	const updateSearchParams = async (params: Partial<TodoSearchParams>) => {
 		navigate({
-			search: (prev) => {
-				return {
-					...prev,
-					...params,
-				};
-			},
+			search: (prev) => ({
+				...prev,
+				...params,
+			}),
 		});
 		await queryClient.invalidateQueries({ queryKey: ["todos"] });
 	};
@@ -322,9 +336,7 @@ function Dashboard() {
 		refetchInterval: isReordering ? false : 5000,
 	});
 
-	const _IGNORED______THIS_CHECKS_FOR_WIFI = useQuery(
-		wifiConnectionQueryOptions(),
-	);
+	useQuery(wifiConnectionQueryOptions());
 
 	const { data: projectsRes } = useQuery({
 		queryKey: ["projects"],
@@ -417,11 +429,6 @@ function Dashboard() {
 				if (!Array.isArray(dataList)) return old;
 
 				const map = new Map(dataList.map((t: Todo) => [t.id, t]));
-				// Assign reorderIndex to match the position each item will land
-				// on the server (see the /todos/reorder route, which sets
-				// reorderIndex = array index). Keeping this in sync locally
-				// means any refetch that lands mid-drag or right after won't
-				// disagree with what's already on screen and cause a flash.
 				const reordered = orderedIds
 					.map((id, index) => {
 						const todo = map.get(id) as Todo | undefined;
@@ -440,10 +447,6 @@ function Dashboard() {
 					queryClient.setQueryData(queryKey, data);
 				});
 			}
-			// Only force a refetch to resync with the server when something
-			// actually went wrong, on success the optimistic state above
-			// already matches what was persisted, so refetching immediately
-			// would just cause a pointless flash
 			queryClient.invalidateQueries({ queryKey: ["todos"] });
 		},
 	});
@@ -461,25 +464,26 @@ function Dashboard() {
 	};
 
 	const createTodoMutation = useMutation({
-		mutationFn: async (payload: { title: string; description?: string }) => {
+		mutationFn: async (payload: FormValues) => {
 			const validated = createTodoSchema.parse(payload);
 
 			const response = await axios.post("/todos", {
 				title: validated.title,
 				description: validated.description || undefined,
+				priority: validated.priority,
+				status: validated.status,
+				projectId: validated.projectId,
+				parentId: validated.parentId,
+				dueDate: validated.dueDate,
+				estimatedMinutes: validated.estimatedMinutes,
 			});
 
 			return response.data;
 		},
 
 		onSuccess: () => {
-			queryClient.invalidateQueries({
-				queryKey: ["todos"],
-			});
-
-			queryClient.invalidateQueries({
-				queryKey: ["todo-stats"],
-			});
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
+			queryClient.invalidateQueries({ queryKey: ["todo-stats"] });
 
 			setIsCreateOpen(false);
 			setNewTitle("");
@@ -598,12 +602,7 @@ function Dashboard() {
 			}}
 		>
 			<aside
-				className="
-					hidden lg:flex
-					w-[240px] xl:w-[260px]
-					shrink-0
-					border-r
-				"
+				className="hidden lg:flex w-[240px] xl:w-[260px] shrink-0 border-r"
 				style={{
 					backgroundColor: "var(--bg-secondary)",
 					borderColor: "var(--border)",
@@ -615,18 +614,13 @@ function Dashboard() {
 					projects={projects}
 					tags={tags}
 					currentUser={currentUser}
-					navigate={navigate}
 				/>
 			</aside>
 
 			<Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
 				<SheetContent
 					side="left"
-					className="
-						w-[min(86vw,300px)]
-						p-0
-						border-r
-					"
+					className="w-[min(86vw,300px)] p-0 border-r"
 					style={{
 						backgroundColor: "var(--bg-secondary)",
 						borderColor: "var(--border)",
@@ -650,10 +644,7 @@ function Dashboard() {
 
 				<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
 					<header
-						className="
-							flex h-14 shrink-0 items-center gap-2
-							border-b px-3 sm:h-16 sm:px-5 lg:px-6
-						"
+						className="flex h-14 shrink-0 items-center gap-2 border-b px-3 sm:h-16 sm:px-5 lg:px-6"
 						style={{
 							backgroundColor: "var(--bg-secondary)",
 							borderColor: "var(--border)",
@@ -667,9 +658,7 @@ function Dashboard() {
 							>
 								<Menu
 									className="h-5 w-5"
-									style={{
-										color: "var(--text-secondary)",
-									}}
+									style={{ color: "var(--text-secondary)" }}
 								/>
 							</Button>
 						</SheetTrigger>
@@ -677,14 +666,8 @@ function Dashboard() {
 						<div className="min-w-0 flex-1">
 							<div className="relative w-full max-w-xl">
 								<Search
-									className="
-										pointer-events-none
-										absolute left-3 top-1/2
-										h-4 w-4 -translate-y-1/2
-									"
-									style={{
-										color: "var(--text-secondary)",
-									}}
+									className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2"
+									style={{ color: "var(--text-secondary)" }}
 								/>
 
 								<Input
@@ -694,14 +677,7 @@ function Dashboard() {
 										searchTodoDebounceFn(event.target.value);
 									}}
 									placeholder="Search tasks..."
-									className="
-										h-9 w-full
-										border-transparent
-										pl-9 pr-9
-										text-sm
-										shadow-none
-										focus-visible:ring-1
-									"
+									className="h-9 w-full border-transparent pl-9 pr-9 text-sm shadow-none focus-visible:ring-1"
 									style={{
 										backgroundColor: "var(--bg)",
 										color: "var(--text)",
@@ -713,10 +689,7 @@ function Dashboard() {
 									<Button
 										variant="ghost"
 										size="icon"
-										className="
-											absolute right-1 top-1/2
-											h-7 w-7 -translate-y-1/2
-										"
+										className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2"
 										onClick={() => searchTodoDebounceFn("")}
 									>
 										<X className="h-3.5 w-3.5" />
@@ -724,39 +697,14 @@ function Dashboard() {
 								)}
 							</div>
 						</div>
-						{/* 
-<Button
-							onClick={async () => {
-								const store = await Store.load("app-settings.json");
-
-								console.log(
-									"yes",
-									await store.get("better-auth.session_token"),
-								);
-							}}
-							variant="outline"
-							size="sm"
-							className="hidden shrink-0 gap-2 sm:inline-flex"
-							style={{
-								borderColor: "var(--border)",
-								color: "var(--text)",
-							}}
-						>
-							<SlidersHorizontal className="h-3.5 w-3.5" />
-							<span>Filter</span>
-						</Button>
-*/}
 
 						<Button
 							size="sm"
 							className="h-9 shrink-0 gap-1.5 text-white"
-							style={{
-								backgroundColor: "var(--link)",
-							}}
+							style={{ backgroundColor: "var(--link)" }}
 							onClick={() => setIsCreateOpen(true)}
 						>
 							<Plus className="h-4 w-4" />
-
 							<span className="hidden sm:inline">New task</span>
 						</Button>
 					</header>
@@ -768,28 +716,15 @@ function Dashboard() {
 									<div className="flex items-center gap-2">
 										<h1
 											className="truncate text-xl font-bold tracking-tight sm:text-2xl"
-											style={{
-												color: "var(--text)",
-											}}
+											style={{ color: "var(--text)" }}
 										>
 											{pageTitle}
 										</h1>
-
-										{/*isFetching && (
-											<span className="hidden rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-500 sm:inline-flex">
-												Fetching...
-											</span>
-										)*/}
 									</div>
 
 									<p
-										className="
-											mt-1 truncate
-											text-xs sm:text-sm
-										"
-										style={{
-											color: "var(--text-secondary)",
-										}}
+										className="mt-1 truncate text-xs sm:text-sm"
+										style={{ color: "var(--text-secondary)" }}
 									>
 										{pageDescription}
 									</p>
@@ -798,44 +733,30 @@ function Dashboard() {
 								<div className="hidden shrink-0 text-right sm:block">
 									<p
 										className="text-lg font-semibold"
-										style={{
-											color: "var(--text)",
-										}}
+										style={{ color: "var(--text)" }}
 									>
 										{todosRes?.totalCount ?? 0}
 									</p>
 									<p
 										className="text-[11px]"
-										style={{
-											color: "var(--text-secondary)",
-										}}
+										style={{ color: "var(--text-secondary)" }}
 									>
 										tasks
 									</p>
 								</div>
 							</div>
 
-							<div
-								className="
-									mb-5
-									grid grid-cols-2
-									gap-2.5
-									sm:grid-cols-3
-									sm:gap-3
-								"
-							>
+							<div className="mb-5 grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3">
 								<StatCard
 									title="Tasks"
 									value={todosRes?.totalCount ?? 0}
 									icon={<CheckSquare className="h-4 w-4 text-blue-500" />}
 								/>
-
 								<StatCard
 									title="Completion"
 									value={`${stats.completionRate}%`}
 									icon={<TrendingUp className="h-4 w-4 text-emerald-500" />}
 								/>
-
 								<StatCard
 									title="Remaining"
 									value={`${Math.floor(
@@ -853,26 +774,16 @@ function Dashboard() {
 								}}
 							>
 								<CardHeader
-									className="
-										flex flex-row items-center
-										justify-between
-										border-b px-4 py-3
-										sm:px-5
-									"
-									style={{
-										borderColor: "var(--border)",
-									}}
+									className="flex flex-row items-center justify-between border-b px-4 py-3 sm:px-5"
+									style={{ borderColor: "var(--border)" }}
 								>
 									<div className="flex min-w-0 items-center gap-2">
 										<CardTitle
 											className="text-sm font-semibold"
-											style={{
-												color: "var(--text)",
-											}}
+											style={{ color: "var(--text)" }}
 										>
 											Your tasks
 										</CardTitle>
-
 										<Badge
 											variant="secondary"
 											className="rounded-full px-2 py-0 text-[10px]"
@@ -883,9 +794,7 @@ function Dashboard() {
 
 									<div
 										className="text-[11px]"
-										style={{
-											color: "var(--text-secondary)",
-										}}
+										style={{ color: "var(--text-secondary)" }}
 									>
 										{isPlaceholderData ? "Loading..." : `${todos.length} shown`}
 									</div>
@@ -957,21 +866,12 @@ function Dashboard() {
 								</CardContent>
 
 								<div
-									className="
-										flex flex-wrap
-										items-center justify-between
-										gap-3 border-t px-4 py-3
-										sm:px-5
-									"
-									style={{
-										borderColor: "var(--border)",
-									}}
+									className="flex flex-wrap items-center justify-between gap-3 border-t px-4 py-3 sm:px-5"
+									style={{ borderColor: "var(--border)" }}
 								>
 									<p
 										className="text-[11px]"
-										style={{
-											color: "var(--text-secondary)",
-										}}
+										style={{ color: "var(--text-secondary)" }}
 									>
 										Page {page} of {totalPages}
 									</p>
@@ -1008,7 +908,7 @@ function Dashboard() {
 								</div>
 							</Card>
 						</div>
-						<div className="w-full flex justify-center">
+						<div className="w-full flex justify-center py-4">
 							<span
 								className="text-xs"
 								style={{ color: "var(--text-secondary)" }}
@@ -1026,20 +926,17 @@ function Dashboard() {
 
 			<CreateTaskDialog
 				open={isCreateOpen}
-				onOpenChange={setIsCreateOpen}
 				title={newTitle}
 				description={newDescription}
 				error={formError}
 				pending={createTodoMutation.isPending}
+				onOpenChange={setIsCreateOpen}
+				setNewTitle={setNewTitle}
 				onTitleChange={setNewTitle}
 				onDescriptionChange={setNewDescription}
-				onSubmit={() =>
-					createTodoMutation.mutate({
-						title: newTitle,
-						description: newDescription,
-					})
-				}
+				onSubmit={(values) => createTodoMutation.mutate(values)}
 				onErrorClear={() => setFormError(null)}
+				projects={projects}
 			/>
 		</div>
 	);
@@ -1067,16 +964,8 @@ function SidebarContent({
 			<div className="min-h-0 flex-1 overflow-y-auto p-4">
 				<div className="mb-7 flex items-center gap-3 px-1">
 					<div
-						className="
-							flex h-9 w-9 shrink-0
-							items-center justify-center
-							rounded-full
-							text-sm font-bold text-white
-							shadow-sm
-						"
-						style={{
-							backgroundColor: "var(--link)",
-						}}
+						className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white shadow-sm"
+						style={{ backgroundColor: "var(--link)" }}
 					>
 						T
 					</div>
@@ -1084,18 +973,13 @@ function SidebarContent({
 					<div className="min-w-0">
 						<p
 							className="truncate text-sm font-semibold"
-							style={{
-								color: "var(--text)",
-							}}
+							style={{ color: "var(--text)" }}
 						>
 							Cakwei's TODO
 						</p>
-
 						<p
 							className="truncate text-[11px]"
-							style={{
-								color: "var(--text-secondary)",
-							}}
+							style={{ color: "var(--text-secondary)" }}
 						>
 							Personal workspace
 						</p>
@@ -1121,7 +1005,7 @@ function SidebarContent({
 						iconClassName="text-emerald-500"
 						label="Today"
 						active={searchParams.tab === "today"}
-						onClick={async () => {
+						onClick={() => {
 							updateSearchParams({
 								tab: "today",
 								projectId: undefined,
@@ -1153,14 +1037,12 @@ function SidebarContent({
 					{projects.length === 0 ? (
 						<p
 							className="px-2 text-[11px]"
-							style={{
-								color: "var(--text-secondary)",
-							}}
+							style={{ color: "var(--text-secondary)" }}
 						>
 							No projects yet
 						</p>
 					) : (
-						<div className="space-y-0.5 hover:bg-(--bg) rounded-sm">
+						<div className="space-y-0.5 rounded-sm">
 							{projects.map((project) => {
 								const active = searchParams.projectId === project.id;
 								return (
@@ -1181,7 +1063,6 @@ function SidebarContent({
 										}}
 									>
 										<ProjectDot color={project.color} />
-
 										<span className="truncate">{project.name}</span>
 									</button>
 								);
@@ -1194,9 +1075,7 @@ function SidebarContent({
 					{tags.length === 0 ? (
 						<p
 							className="px-2 text-[11px]"
-							style={{
-								color: "var(--text-secondary)",
-							}}
+							style={{ color: "var(--text-secondary)" }}
 						>
 							No tags yet
 						</p>
@@ -1217,18 +1096,11 @@ function SidebarContent({
 
 			<div
 				className="shrink-0 border-t p-3"
-				style={{
-					borderColor: "var(--border)",
-				}}
+				style={{ borderColor: "var(--border)" }}
 			>
 				<div className="flex min-w-0 items-center gap-2.5">
 					<div
-						className="
-							flex h-8 w-8 shrink-0
-							items-center justify-center
-							rounded-full
-							text-[10px] font-semibold
-						"
+						className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold"
 						style={{
 							backgroundColor: "var(--bg)",
 							color: "var(--text)",
@@ -1240,18 +1112,13 @@ function SidebarContent({
 					<div className="min-w-0 flex-1">
 						<p
 							className="truncate text-xs font-medium"
-							style={{
-								color: "var(--text)",
-							}}
+							style={{ color: "var(--text)" }}
 						>
 							{currentUser?.name || "User Account"}
 						</p>
-
 						<p
 							className="truncate text-[10px]"
-							style={{
-								color: "var(--text-secondary)",
-							}}
+							style={{ color: "var(--text-secondary)" }}
 						>
 							{currentUser?.email || "user@dev.io"}
 						</p>
@@ -1274,7 +1141,6 @@ function SidebarContent({
 												const store = await Store.load("app-settings.json");
 												await store.delete("better-auth.session_token");
 												await store.save();
-
 												window.location.href = "/login";
 											},
 										},
@@ -1303,19 +1169,12 @@ function SidebarSection({
 	return (
 		<section className="mt-7">
 			<div
-				className="
-					mb-2 flex items-center gap-1.5
-					px-2 text-[10px] font-semibold
-					uppercase tracking-wider
-				"
-				style={{
-					color: "var(--text-secondary)",
-				}}
+				className="mb-2 flex items-center gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wider"
+				style={{ color: "var(--text-secondary)" }}
 			>
 				{icon}
 				<span>{title}</span>
 			</div>
-
 			{children}
 		</section>
 	);
@@ -1354,21 +1213,39 @@ function TodoRow({
 	onToggle,
 	onUpdateTodo,
 	dragHandleProps,
-}: TodoRowProps) {
+}: {
+	todo: Todo;
+	onToggle: () => void;
+	onUpdateTodo: (payload: {
+		title?: string;
+		description?: string | null;
+		priority?: Todo["priority"];
+		dueDate?: Date | null;
+	}) => void;
+	dragHandleProps?: any;
+}) {
 	const completed = todo.status === "COMPLETED";
 
 	const [isEditingTitle, setIsEditingTitle] = useState(false);
 	const [isEditingDesc, setIsEditingDesc] = useState(false);
 	const [isEditingDueDate, setIsEditingDueDate] = useState(false);
 
-	// State to control the comprehensive Edit Modal dialog
+	// Initial date & time states
+	const initialDate = todo.dueDate ? new Date(todo.dueDate) : null;
+	const [inlineDate, setInlineDate] = useState<Date | null>(initialDate);
+	const [inlineTime, setInlineTime] = useState<string>(
+		initialDate ? initialDate.toTimeString().slice(0, 5) : "",
+	);
+
 	const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
 	const [modalTitle, setModalTitle] = useState(todo.title);
 	const [modalDesc, setModalDesc] = useState(todo.description ?? "");
 	const [modalPriority, setModalPriority] = useState(todo.priority);
-	const [modalDueDate, setModalDueDate] = useState<Date | null>(
-		todo.dueDate ? new Date(todo.dueDate) : null,
+	const [modalDate, setModalDate] = useState<Date | null>(initialDate);
+	const [modalTime, setModalTime] = useState<string>(
+		initialDate ? initialDate.toTimeString().slice(0, 5) : "",
 	);
+	const [isModalCalendarOpen, setIsModalCalendarOpen] = useState(false);
 
 	const titleRef = useRef<HTMLInputElement>(null);
 	const descRef = useRef<HTMLTextAreaElement>(null);
@@ -1407,12 +1284,45 @@ function TodoRow({
 		}
 	};
 
+	const handleInlineSaveDueDate = (
+		dateToSave: Date | null,
+		timeToSave: string,
+	) => {
+		if (!dateToSave) {
+			onUpdateTodo({ dueDate: null });
+			setIsEditingDueDate(false);
+			return;
+		}
+
+		const finalDate = new Date(dateToSave);
+		if (timeToSave) {
+			const [hours, minutes] = timeToSave.split(":");
+			finalDate.setHours(parseInt(hours, 10), parseInt(minutes, 10), 0, 0);
+		} else {
+			finalDate.setHours(0, 0, 0, 0);
+		}
+
+		onUpdateTodo({ dueDate: finalDate });
+		setIsEditingDueDate(false);
+	};
+
 	const handleSaveModal = () => {
+		let finalDate: Date | null = null;
+		if (modalDate) {
+			finalDate = new Date(modalDate);
+			if (modalTime) {
+				const [hours, minutes] = modalTime.split(":");
+				finalDate.setHours(parseInt(hours, 10), parseInt(minutes, 10), 0, 0);
+			} else {
+				finalDate.setHours(0, 0, 0, 0);
+			}
+		}
+
 		onUpdateTodo({
 			title: modalTitle.trim() || todo.title,
 			description: modalDesc.trim() || null,
 			priority: modalPriority,
-			dueDate: modalDueDate,
+			dueDate: finalDate,
 		});
 		setIsDetailsModalOpen(false);
 	};
@@ -1469,7 +1379,7 @@ function TodoRow({
 									maxLength={TITLE_MAX_LENGTH}
 									onBlur={handleSaveTitle}
 									onKeyDown={handleTitleKeyDown}
-									className="h-auto w-full rounded-none border-0 border-b border-blue-500 bg-(--bg) dark:bg-(--bg) px-0 py-0 text-sm font-medium leading-5 shadow-none focus-visible:ring-0"
+									className="h-auto w-full rounded-none border-0 border-b border-blue-500 bg-(--bg) px-0 py-0 text-sm font-medium leading-5 shadow-none focus-visible:ring-0"
 									style={{ color: "var(--text)" }}
 								/>
 							) : (
@@ -1500,7 +1410,7 @@ function TodoRow({
 									maxLength={DESCRIPTION_MAX_LENGTH}
 									onBlur={handleSaveDesc}
 									onKeyDown={handleDescKeyDown}
-									className="min-h-0 w-full resize-none rounded-none border-0 border-b border-blue-500 bg-(--bg) dark:bg-(--bg) px-0 py-0 text-sm shadow-none focus-visible:ring-0"
+									className="min-h-0 w-full resize-none rounded-none border-0 border-b border-blue-500 bg-(--bg) px-0 py-0 text-sm shadow-none focus-visible:ring-0"
 									style={{ color: "var(--text)" }}
 								/>
 							) : (
@@ -1535,7 +1445,14 @@ function TodoRow({
 							{todo.dueDate && (
 								<Popover
 									open={isEditingDueDate}
-									onOpenChange={setIsEditingDueDate}
+									onOpenChange={(open) => {
+										setIsEditingDueDate(open);
+										if (open && todo.dueDate) {
+											const d = new Date(todo.dueDate);
+											setInlineDate(d);
+											setInlineTime(d.toTimeString().slice(0, 5));
+										}
+									}}
 								>
 									<PopoverTrigger asChild>
 										<Label
@@ -1553,28 +1470,58 @@ function TodoRow({
 										</Label>
 									</PopoverTrigger>
 									<PopoverContent
-										className="w-auto p-0 shadow-lg"
+										className="w-auto p-3 shadow-lg space-y-3"
 										align="start"
 										style={{
 											backgroundColor: "var(--bg-secondary)",
 											borderColor: "var(--border)",
+											color: "var(--text)",
 										}}
 									>
 										<Calendar
 											mode="single"
-											selected={
-												todo.dueDate ? new Date(todo.dueDate) : undefined
-											}
-											onSelect={(date) => {
-												onUpdateTodo({ dueDate: date ?? null });
-												setIsEditingDueDate(false);
-											}}
-											className="rounded-md border p-3"
+											selected={inlineDate ?? undefined}
+											onSelect={(date) => setInlineDate(date ?? null)}
+											className="rounded-md border p-2 bg-(--bg) dark:bg-(--bg)"
 											style={{
-												backgroundColor: "var(--bg-secondary)",
+												backgroundColor: "var(--bg)",
 												color: "var(--text)",
 											}}
 										/>
+										<div className="space-y-1">
+											<Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+												Time
+											</Label>
+											<div className="relative">
+												<Clock className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 opacity-70" />
+												<Input
+													type="time"
+													value={inlineTime}
+													onChange={(e) => setInlineTime(e.target.value)}
+													className="pl-8 text-xs h-8 bg-(--bg) dark:bg-(--bg)"
+												/>
+											</div>
+										</div>
+										<div className="flex justify-end gap-2 pt-1">
+											<Button
+												variant="outline"
+												size="sm"
+												className="h-7 text-xs"
+												onClick={() => setIsEditingDueDate(false)}
+											>
+												Cancel
+											</Button>
+											<Button
+												size="sm"
+												className="h-7 text-xs text-white"
+												style={{ backgroundColor: "var(--link)" }}
+												onClick={() =>
+													handleInlineSaveDueDate(inlineDate, inlineTime)
+												}
+											>
+												Save
+											</Button>
+										</div>
 									</PopoverContent>
 								</Popover>
 							)}
@@ -1614,11 +1561,9 @@ function TodoRow({
 					</div>
 
 					<div className="hidden shrink-0 items-center gap-1.5 lg:flex">
-						{todo.tags
-							?.slice(0, 3)
-							.map((item: { tagId: string; tag: { name: string } }) => (
-								<TagBadge key={item.tagId} name={item.tag?.name} />
-							))}
+						{todo.tags?.slice(0, 3).map((item) => (
+							<TagBadge key={item.tagId} name={item.tag?.name} />
+						))}
 						<PriorityMenu
 							priority={todo.priority}
 							disabled={completed}
@@ -1626,7 +1571,6 @@ function TodoRow({
 						/>
 						<StatusBadge status={todo.status} />
 
-						{/* Edit Button on the right side */}
 						<Button
 							variant="ghost"
 							size="icon"
@@ -1635,7 +1579,9 @@ function TodoRow({
 								setModalTitle(todo.title);
 								setModalDesc(todo.description ?? "");
 								setModalPriority(todo.priority);
-								setModalDueDate(todo.dueDate ? new Date(todo.dueDate) : null);
+								const d = todo.dueDate ? new Date(todo.dueDate) : null;
+								setModalDate(d);
+								setModalTime(d ? d.toTimeString().slice(0, 5) : "");
 								setIsDetailsModalOpen(true);
 							}}
 							title="Edit task details"
@@ -1646,7 +1592,6 @@ function TodoRow({
 				</div>
 			</div>
 
-			{/* Comprehensive Edit Modal Dialog */}
 			<Dialog open={isDetailsModalOpen} onOpenChange={setIsDetailsModalOpen}>
 				<DialogContent
 					className="sm:max-w-[425px]"
@@ -1688,25 +1633,83 @@ function TodoRow({
 								rows={3}
 							/>
 						</div>
-						<div className="grid gap-2">
-							<Label
-								className="text-xs font-medium"
-								style={{ color: "var(--text-secondary)" }}
-							>
-								Due Date
-							</Label>
-							<Calendar
-								mode="single"
-								selected={modalDueDate ?? undefined}
-								onSelect={(date) => setModalDueDate(date ?? null)}
-								className="rounded-md border p-3 w-full"
-								style={{ backgroundColor: "var(--bg-secondary)" }}
-							/>
+
+						{/* Equal Sized Date & Time Row */}
+						<div className="grid grid-cols-2 gap-3">
+							<div className="grid gap-2">
+								<Label
+									className="text-xs font-medium"
+									style={{ color: "var(--text-secondary)" }}
+								>
+									Due Date
+								</Label>
+								<Popover
+									open={isModalCalendarOpen}
+									onOpenChange={setIsModalCalendarOpen}
+								>
+									<PopoverTrigger asChild>
+										<Button
+											variant="outline"
+											className="w-full justify-start text-left font-normal text-xs h-9"
+											style={{
+												backgroundColor: "var(--bg)",
+												borderColor: "var(--border)",
+												color: modalDate
+													? "var(--text)"
+													: "var(--text-secondary)",
+											}}
+										>
+											<CalendarDays className="mr-2 h-3.5 w-3.5 opacity-70" />
+											{modalDate ? modalDate.toLocaleDateString() : "Pick date"}
+										</Button>
+									</PopoverTrigger>
+									<PopoverContent
+										className="w-auto p-0 shadow-lg"
+										align="start"
+										style={{
+											backgroundColor: "var(--bg-secondary)",
+											borderColor: "var(--border)",
+										}}
+									>
+										<Calendar
+											mode="single"
+											selected={modalDate ?? undefined}
+											onSelect={(date) => {
+												setModalDate(date ?? null);
+												setIsModalCalendarOpen(false);
+											}}
+											className="rounded-md border p-3 "
+											style={{
+												backgroundColor: "var(--bg)",
+												color: "var(--text)",
+											}}
+										/>
+									</PopoverContent>
+								</Popover>
+							</div>
+
+							<div className="grid gap-2">
+								<Label
+									className="text-xs font-medium"
+									style={{ color: "var(--text-secondary)" }}
+								>
+									Time
+								</Label>
+								<div className="relative">
+									<Clock className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 opacity-70" />
+									<Input
+										type="time"
+										value={modalTime}
+										onChange={(e) => setModalTime(e.target.value)}
+										className="pl-8 text-xs h-9 bg-(--bg) dark:bg-(--bg)"
+									/>
+								</div>
+							</div>
 						</div>
 					</div>
 					<DialogFooter>
 						<Button
-							variant="outline"
+							className="border border-red-500 bg-(--bg-secondary) text-red-500 hover:bg-red-500 hover:text-(--text)"
 							onClick={() => setIsDetailsModalOpen(false)}
 						>
 							Cancel
@@ -1796,26 +1799,16 @@ function StatCard({
 				<div className="flex items-center justify-between gap-2">
 					<span
 						className="truncate text-[10px] font-medium uppercase tracking-wide sm:text-[11px]"
-						style={{
-							color: "var(--text-secondary)",
-						}}
+						style={{ color: "var(--text-secondary)" }}
 					>
 						{title}
 					</span>
-
 					{icon}
 				</div>
 
 				<p
-					className="
-						mt-1.5
-						text-base font-bold
-						tracking-tight
-						sm:text-xl
-					"
-					style={{
-						color: "var(--text)",
-					}}
+					className="mt-1.5 text-base font-bold tracking-tight sm:text-xl"
+					style={{ color: "var(--text)" }}
 				>
 					{value}
 				</p>
@@ -1833,26 +1826,10 @@ function PriorityBadge({ priority }: { priority: Todo["priority"] }) {
 			background: string;
 		}
 	> = {
-		LOW: {
-			label: "Low",
-			color: "#64748b",
-			background: "#64748b14",
-		},
-		MEDIUM: {
-			label: "Medium",
-			color: "#3b82f6",
-			background: "#3b82f614",
-		},
-		HIGH: {
-			label: "High",
-			color: "#f59e0b",
-			background: "#f59e0b14",
-		},
-		URGENT: {
-			label: "Urgent",
-			color: "#ef4444",
-			background: "#ef444414",
-		},
+		LOW: { label: "Low", color: "#64748b", background: "#64748b14" },
+		MEDIUM: { label: "Medium", color: "#3b82f6", background: "#3b82f614" },
+		HIGH: { label: "High", color: "#f59e0b", background: "#f59e0b14" },
+		URGENT: { label: "Urgent", color: "#ef4444", background: "#ef444414" },
 	};
 
 	const style = styles[priority] ?? styles.MEDIUM;
@@ -1872,17 +1849,14 @@ function PriorityBadge({ priority }: { priority: Todo["priority"] }) {
 
 function StatusBadge({ status }: { status: Todo["status"] }) {
 	const labels: Record<Todo["status"], string> = {
-		BACKLOG: "Backlog",
-		TODO: "Todo",
 		IN_PROGRESS: "In progress",
-		IN_REVIEW: "Review",
+		LATE: "Late",
 		COMPLETED: "Completed",
-		CANCELLED: "Cancelled",
 	};
 
 	return (
 		<span
-			className="px-2.5 flex items-center rounded-md py-0.5 text-[9px]"
+			className="px-2.5 flex items-center rounded-md py-0.5 text-[9px] font-medium"
 			style={{
 				color: status === "COMPLETED" ? "#10b981" : "var(--text-secondary)",
 				backgroundColor: status === "COMPLETED" ? "#10b98114" : "var(--bg)",
@@ -1916,50 +1890,29 @@ function EmptyState({
 	search: boolean;
 	onCreate: () => void;
 }) {
-	//console.log(search)
 	return (
 		<div className="flex flex-col items-center justify-center px-6 py-16 text-center">
 			<div
-				className="
-					mb-4 flex h-12 w-12
-					items-center justify-center
-					rounded-2xl
-				"
-				style={{
-					backgroundColor: "var(--bg)",
-				}}
+				className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl"
+				style={{ backgroundColor: "var(--bg)" }}
 			>
 				{search ? (
 					<Search
 						className="h-5 w-5"
-						style={{
-							color: "var(--text-secondary)",
-						}}
+						style={{ color: "var(--text-secondary)" }}
 					/>
 				) : (
-					<Check
-						className="h-5 w-5"
-						style={{
-							color: "var(--link)",
-						}}
-					/>
+					<Check className="h-5 w-5" style={{ color: "var(--link)" }} />
 				)}
 			</div>
 
-			<h3
-				className="text-sm font-semibold"
-				style={{
-					color: "var(--text)",
-				}}
-			>
+			<h3 className="text-sm font-semibold" style={{ color: "var(--text)" }}>
 				{search ? "No tasks found" : "You're all caught up"}
 			</h3>
 
 			<p
 				className="mt-1 max-w-xs text-xs leading-5"
-				style={{
-					color: "var(--text-secondary)",
-				}}
+				style={{ color: "var(--text-secondary)" }}
 			>
 				{search
 					? "Try a different search term."
@@ -1970,9 +1923,7 @@ function EmptyState({
 				<Button
 					size="sm"
 					className="mt-5 gap-1.5 text-white"
-					style={{
-						backgroundColor: "var(--link)",
-					}}
+					style={{ backgroundColor: "var(--link)" }}
 					onClick={onCreate}
 				>
 					<Plus className="h-4 w-4" />
@@ -1986,41 +1937,75 @@ function EmptyState({
 function CreateTaskDialog({
 	open,
 	onOpenChange,
-	title,
-	description,
-	error,
+	error: externalError,
 	pending,
-	onTitleChange,
-	onDescriptionChange,
 	onSubmit,
 	onErrorClear,
-}: {
-	open: boolean;
-	onOpenChange: (open: boolean) => void;
-	title: string;
-	description: string;
-	error: string | null;
-	pending: boolean;
-	onTitleChange: (value: string) => void;
-	onDescriptionChange: (value: string) => void;
-	onSubmit: () => void;
-	onErrorClear: () => void;
-}) {
+	projects = [],
+	defaultProjectId,
+	defaultParentId,
+}: CreateTaskDialogProps) {
+	const [title, setTitle] = useState("");
+	const [description, setDescription] = useState("");
+	const [priority, setPriority] = useState<
+		"LOW" | "MEDIUM" | "HIGH" | "URGENT"
+	>("MEDIUM");
+	const [dueDate, setDueDate] = useState<Date | null>(null);
+	const [dueTime, setDueTime] = useState<string>("");
+	const [isCalendarOpen, setIsCalendarOpen] = useState(false);
+	const [projectId, setProjectId] = useState(defaultProjectId || "");
+	const [validationError, setValidationError] = useState<string | null>(null);
+
+	const handleFormSubmit = () => {
+		setValidationError(null);
+
+		let finalDate: Date | null = null;
+		if (dueDate) {
+			finalDate = new Date(dueDate);
+			if (dueTime) {
+				const [hours, minutes] = dueTime.split(":");
+				finalDate.setHours(parseInt(hours, 10), parseInt(minutes, 10), 0, 0);
+			}
+		}
+
+		const result = createTodoSchema.safeParse({
+			title,
+			status: TodoStatus.IN_PROGRESS,
+			description: description.trim() ? description : undefined,
+			priority,
+			dueDate: finalDate || undefined,
+			projectId: projectId || undefined,
+			parentId: defaultParentId || undefined,
+		});
+
+		if (!result.success) {
+			const flattened = result.error.flatten();
+			const firstError =
+				flattened.formErrors[0] ||
+				Object.values(flattened.fieldErrors)[0]?.[0] ||
+				"Invalid input";
+			setValidationError(firstError);
+			return;
+		}
+
+		onSubmit(result.data);
+	};
+
 	return (
 		<Dialog
 			open={open}
 			onOpenChange={(value) => {
 				onOpenChange(value);
-
 				if (!value) {
 					onErrorClear();
+					setValidationError(null);
+					setDueDate(null);
+					setDueTime("");
 				}
 			}}
 		>
 			<DialogContent
-				className="
-					w-[calc(100vw-24px)] max-w-[480px] rounded-2xl border
-				"
+				className="w-[calc(100vw-24px)] max-w-[480px] rounded-2xl border"
 				style={{
 					backgroundColor: "var(--bg-secondary)",
 					borderColor: "var(--border)",
@@ -2028,18 +2013,13 @@ function CreateTaskDialog({
 				}}
 			>
 				<DialogHeader>
-					<DialogTitle
-						className="text-base"
-						style={{
-							color: "var(--text)",
-						}}
-					>
+					<DialogTitle className="text-base" style={{ color: "var(--text)" }}>
 						Create task
 					</DialogTitle>
 				</DialogHeader>
 
 				<div className="space-y-4 py-2">
-					{error && (
+					{(validationError || externalError) && (
 						<div
 							className="rounded-lg px-3 py-2 text-xs"
 							style={{
@@ -2047,29 +2027,23 @@ function CreateTaskDialog({
 								color: "#ef4444",
 							}}
 						>
-							{error}
+							{validationError || externalError}
 						</div>
 					)}
 
 					<div>
 						<Label
-							className="
-								text-[10px] font-semibold
-								uppercase tracking-wider
-							"
-							style={{
-								color: "var(--text-secondary)",
-							}}
+							className="text-[10px] font-semibold uppercase tracking-wider"
+							style={{ color: "var(--text-secondary)" }}
 						>
 							Title
 						</Label>
-
 						<Input
 							autoFocus
 							placeholder="What needs to be done?"
 							value={title}
-							onChange={(event) => onTitleChange(event.target.value)}
-							maxLength={TITLE_MAX_LENGTH}
+							onChange={(event) => setTitle(event.target.value)}
+							maxLength={255}
 							className="mt-1.5"
 							style={{
 								backgroundColor: "var(--bg)",
@@ -2077,36 +2051,27 @@ function CreateTaskDialog({
 								color: "var(--text)",
 							}}
 						/>
-
 						<p
 							className="mt-1 text-right text-[10px]"
-							style={{
-								color: "var(--text-secondary)",
-							}}
+							style={{ color: "var(--text-secondary)" }}
 						>
-							{title.length}/{TITLE_MAX_LENGTH}
+							{title.length}/255
 						</p>
 					</div>
 
 					<div>
 						<Label
-							className="
-								text-[10px] font-semibold
-								uppercase tracking-wider
-							"
-							style={{
-								color: "var(--text-secondary)",
-							}}
+							className="text-[10px] font-semibold uppercase tracking-wider"
+							style={{ color: "var(--text-secondary)" }}
 						>
 							Description
 						</Label>
-
 						<Textarea
 							placeholder="Add some context..."
 							value={description}
-							onChange={(event) => onDescriptionChange(event.target.value)}
-							maxLength={DESCRIPTION_MAX_LENGTH}
-							rows={4}
+							onChange={(event) => setDescription(event.target.value)}
+							maxLength={5000}
+							rows={3}
 							className="mt-1.5 resize-none"
 							style={{
 								backgroundColor: "var(--bg)",
@@ -2115,11 +2080,159 @@ function CreateTaskDialog({
 							}}
 						/>
 					</div>
+
+					<div className="grid grid-cols-2 gap-3">
+						<div>
+							<Label
+								className="text-[10px] font-semibold uppercase tracking-wider"
+								style={{ color: "var(--text-secondary)" }}
+							>
+								Priority
+							</Label>
+							<Select
+								value={priority}
+								onValueChange={(value) => setPriority(value as any)}
+							>
+								<SelectTrigger
+									className="mt-1.5 w-full text-xs"
+									style={{
+										backgroundColor: "var(--bg)",
+										borderColor: "var(--border)",
+										color: "var(--text)",
+									}}
+								>
+									<SelectValue placeholder="Select priority" />
+								</SelectTrigger>
+								<SelectContent
+									style={{
+										backgroundColor: "var(--bg-secondary)",
+										borderColor: "var(--border)",
+										color: "var(--text)",
+									}}
+								>
+									<SelectItem value="LOW">Low</SelectItem>
+									<SelectItem value="MEDIUM">Medium</SelectItem>
+									<SelectItem value="HIGH">High</SelectItem>
+									<SelectItem value="URGENT">Urgent</SelectItem>
+								</SelectContent>
+							</Select>
+						</div>
+
+						<div>
+							<Label
+								className="text-[10px] font-semibold uppercase tracking-wider"
+								style={{ color: "var(--text-secondary)" }}
+							>
+								Due Date
+							</Label>
+							<Popover open={isCalendarOpen} onOpenChange={setIsCalendarOpen}>
+								<PopoverTrigger asChild>
+									<Button
+										variant="outline"
+										className="mt-1.5 w-full justify-start text-left font-normal text-xs h-9"
+										style={{
+											backgroundColor: "var(--bg)",
+											borderColor: "var(--border)",
+											color: dueDate ? "var(--text)" : "var(--text-secondary)",
+										}}
+									>
+										<CalendarDays className="mr-2 h-3.5 w-3.5 opacity-70" />
+										{dueDate ? dueDate.toLocaleDateString() : "Pick a date"}
+									</Button>
+								</PopoverTrigger>
+								<PopoverContent
+									className="w-auto p-0 shadow-lg"
+									align="start"
+									style={{
+										backgroundColor: "var(--bg-secondary)",
+										borderColor: "var(--border)",
+									}}
+								>
+									<Calendar
+										mode="single"
+										selected={dueDate || undefined}
+										onSelect={(date) => {
+											setDueDate(date || null);
+											setIsCalendarOpen(false);
+										}}
+										className="rounded-md border p-3"
+										style={{
+											backgroundColor: "var(--bg)",
+											color: "var(--text)",
+										}}
+									/>
+								</PopoverContent>
+							</Popover>
+						</div>
+					</div>
+
+					<div className="grid grid-cols-2 gap-3">
+						<div>
+							<Label
+								className="text-[10px] font-semibold uppercase tracking-wider"
+								style={{ color: "var(--text-secondary)" }}
+							>
+								Due Time
+							</Label>
+							<div className="relative mt-1.5">
+								<Clock className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 opacity-70" />
+								<Input
+									type="time"
+									value={dueTime}
+									color="var(--text)"
+									onChange={(e) => setDueTime(e.target.value)}
+									className=" pl-8 text-xs h-9 bg-(--bg) dark:bg-(--bg)"
+								/>
+							</div>
+						</div>
+
+						{projects.length > 0 && (
+							<div>
+								<Label
+									className="text-[10px] font-semibold uppercase tracking-wider"
+									style={{ color: "var(--text-secondary)" }}
+								>
+									Project
+								</Label>
+								<Select
+									value={projectId}
+									onValueChange={(value) =>
+										setProjectId(value === "none" ? "" : value)
+									}
+								>
+									<SelectTrigger
+										className="mt-1.5 w-full text-xs h-9"
+										style={{
+											backgroundColor: "var(--bg)",
+											borderColor: "var(--border)",
+											color: "var(--text)",
+										}}
+									>
+										<SelectValue placeholder="No Project (Inbox)" />
+									</SelectTrigger>
+									<SelectContent
+										style={{
+											backgroundColor: "var(--bg-secondary)",
+											borderColor: "var(--border)",
+											color: "var(--text)",
+										}}
+									>
+										<SelectItem value="none">No Project (Inbox)</SelectItem>
+										{projects.map((p) => (
+											<SelectItem key={p.id} value={p.id}>
+												{p.name}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							</div>
+						)}
+					</div>
 				</div>
 
 				<DialogFooter className="gap-2">
 					<Button
-						variant="outline"
+						className="border border-red-500 bg-(--bg-secondary) text-red-500 hover:bg-red-500 hover:text-(--text)"
 						onClick={() => onOpenChange(false)}
 						disabled={pending}
 					>
@@ -2127,12 +2240,10 @@ function CreateTaskDialog({
 					</Button>
 
 					<Button
-						onClick={onSubmit}
+						onClick={handleFormSubmit}
 						disabled={!title.trim() || pending}
 						className="text-white"
-						style={{
-							backgroundColor: "var(--link)",
-						}}
+						style={{ backgroundColor: "var(--link)" }}
 					>
 						{pending ? "Creating..." : "Create task"}
 					</Button>
@@ -2154,9 +2265,7 @@ function ProjectDot({ color }: { color?: string }) {
 	return (
 		<span
 			className="h-2 w-2 shrink-0 rounded-full"
-			style={{
-				backgroundColor: color,
-			}}
+			style={{ backgroundColor: color }}
 		/>
 	);
 }

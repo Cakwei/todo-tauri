@@ -60,14 +60,14 @@ async function main() {
 
   // Seed Projects (25 records distributed across users)
   const colors = ["#3b82f6", "#10b981", "#a855f7", "#ef4444", "#f59e0b", "#6366f1"];
-  const icons = ["briefcase", "user", "rocket", "code", "folder", "terminal"];
+  // const icons = ["briefcase", "user", "rocket", "code", "folder", "terminal"];
 
   const projectData = Array.from({ length: 25 }).map((_, i) => ({
     id: crypto.randomUUID(),
     name: `Project Workspace ${i + 1}`,
     description: `Detailed workspace bundle description for project #${i + 1}`,
     color: colors[i % colors.length],
-    icon: icons[i % icons.length],
+    // icon: icons[i % icons.length],
     userId: users[i % users.length].id,
   }));
 
@@ -123,7 +123,7 @@ async function main() {
       estimatedMinutes: (i + 1) * 15,
       actualMinutes: i % 2 === 0 ? (i + 1) * 10 : 0,
       isPinned: i % 4 === 0,
-      position: (i + 1) * 1000.0,
+      // position: (i + 1) * 1000.0,
       userId: ownerUser.id,
       projectId: assignedProject ? assignedProject.id : null,
     };

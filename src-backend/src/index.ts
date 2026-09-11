@@ -2,7 +2,6 @@ import { existsSync } from "node:fs";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
-import redis from "@fastify/redis";
 import Fastify from "fastify";
 import { authRoutes } from "./api/auth/auth";
 import { healthRoutes } from "./api/health";
@@ -10,31 +9,30 @@ import { projectRoutes } from "./api/projects/index";
 import { tagRoutes } from "./api/tags/index";
 import { todoRoutes } from "./api/todos/index";
 import { CORSList } from "./lib/const";
+import { redis } from "./lib/redis";
 
 const PORT = 3001;
-const server = Fastify(/*{ logger: true }*/);
+const server = Fastify({
+	/*logger: true*/
+});
+
 if (existsSync(".env")) {
 	process.loadEnvFile();
 }
 
 if (!process.env.BETTER_AUTH_URL)
 	throw Error("BETTER_AUTH_URL is not set as environment variable");
-if (!process.env.REDIS_URL)
-	throw Error("REDIS_URL is not set as environment variable");
-
-// Redis
-await server.register(redis, {
-	url: process.env.REDIS_URL,
-});
 
 // Rate-limit
-if (process.env.NODE_ENV === "production") {
-	await server.register(rateLimit, {
-		max: 15,
-		timeWindow: "1 minute",
-		redis: server.redis,
-	});
-}
+// if (process.env.NODE_ENV === "production") {
+await server.register(rateLimit, {
+	max: 30,
+	timeWindow: "1 minute",
+	redis: redis,
+	skipOnError: true,
+});
+// }
+
 // CORS Settings
 await server.register(cors, {
 	origin: CORSList,

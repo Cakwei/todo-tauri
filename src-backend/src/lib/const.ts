@@ -1,4 +1,7 @@
 import { existsSync } from "node:fs";
+import pino from "pino";
+
+export const logger = pino({ level: "debug" });
 
 if (existsSync(".env")) {
 	process.loadEnvFile();
