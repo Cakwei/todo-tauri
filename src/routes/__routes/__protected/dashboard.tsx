@@ -15,6 +15,7 @@ import {
 	Check,
 	CheckCircle2,
 	CheckSquare,
+	ChevronDown,
 	ChevronLeft,
 	ChevronRight,
 	Circle,
@@ -1209,17 +1210,21 @@ function SidebarItem({
 
 function TodoRow({
 	todo,
+	projects = [],
 	onToggle,
 	onUpdateTodo,
 	dragHandleProps,
 }: {
-	todo: Todo;
+	todo: any;
+	projects?: { id: string; name: string }[];
 	onToggle: () => void;
 	onUpdateTodo: (payload: {
 		title?: string;
 		description?: string | null;
-		priority?: Todo["priority"];
+		priority?: any;
 		dueDate?: Date | null;
+		status?: any;
+		projectId?: string | null;
 	}) => void;
 	dragHandleProps?: any;
 }) {
@@ -1329,12 +1334,12 @@ function TodoRow({
 	return (
 		<>
 			<div
-				className={`group relative border-b py-3.5 px-3 transition-colors sm:px-5 last:border-b-0 ${
+				className={`group relative border-b py-3.5 px-3 transition-colors sm:px-5 last:border-b-0 flex items-start justify-between gap-3 ${
 					completed ? "opacity-60" : ""
 				}`}
 				style={{ borderColor: "var(--border)" }}
 			>
-				<div className="flex min-w-0 items-start gap-2.5 sm:gap-3">
+				<div className="flex min-w-0 items-start gap-2.5 sm:gap-3 flex-1">
 					<div
 						className="hidden pt-1 sm:block cursor-grab active:cursor-grabbing"
 						{...dragHandleProps}
@@ -1363,7 +1368,6 @@ function TodoRow({
 							/>
 						)}
 					</Button>
-
 					<div className="min-w-0 flex-1">
 						<div className="flex min-w-0 items-center gap-2">
 							{todo.isPinned && (
@@ -1431,15 +1435,46 @@ function TodoRow({
 						</div>
 
 						<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-							{todo.project?.name && (
-								<span
-									className="flex min-w-0 max-w-[180px] items-center gap-1 text-[10px] font-medium"
-									style={{ color: "var(--text-secondary)" }}
+							{/* Project Dropdown Selection */}
+							<DropdownMenu>
+								<DropdownMenuTrigger asChild>
+									<span
+										title="Click to change project"
+										className="flex min-w-0 max-w-[180px] items-center gap-1 text-[10px] font-medium cursor-pointer transition-colors hover:text-blue-500 select-none"
+										style={{ color: "var(--text-secondary)" }}
+									>
+										<Folder className="h-3 w-3 shrink-0" />
+										<span className="truncate">
+											{todo.project?.name || "No project"}
+										</span>
+										<ChevronDown className="h-2.5 w-2.5 opacity-60" />
+									</span>
+								</DropdownMenuTrigger>
+								<DropdownMenuContent
+									align="start"
+									style={{
+										backgroundColor: "var(--bg-secondary)",
+										borderColor: "var(--border)",
+										color: "var(--text)",
+									}}
 								>
-									<Folder className="h-3 w-3 shrink-0" />
-									<span className="truncate">{todo.project.name}</span>
-								</span>
-							)}
+									<DropdownMenuItem
+										onClick={() => onUpdateTodo({ projectId: null })}
+										className="text-[11px] cursor-pointer"
+									>
+										<span className="italic opacity-60">No project</span>
+									</DropdownMenuItem>
+									{projects.map((proj) => (
+										<DropdownMenuItem
+											key={proj.id}
+											onClick={() => onUpdateTodo({ projectId: proj.id })}
+											className="text-xs cursor-pointer"
+										>
+											{proj.name}
+										</DropdownMenuItem>
+									))}
+								</DropdownMenuContent>
+							</DropdownMenu>
 
 							{todo.dueDate && (
 								<Popover
@@ -1546,48 +1581,80 @@ function TodoRow({
 							)}
 						</div>
 
-						<div className="mt-2.5 flex flex-wrap gap-1.5 lg:hidden">
+						{/* Unified badges section at the bottom with Status Dropdown */}
+						<div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+							{todo.tags?.map((item: any) => (
+								<TagBadge key={item.tagId} name={item.tag?.name} />
+							))}
 							<PriorityMenu
 								priority={todo.priority}
 								disabled={completed}
 								onChange={(priority) => onUpdateTodo({ priority })}
 							/>
-							<StatusBadge status={todo.status} />
-							{todo.tags?.slice(0, 2).map((item) => (
-								<TagBadge key={item.tagId} name={item.tag?.name} />
-							))}
+
+							<DropdownMenu>
+								<DropdownMenuTrigger asChild>
+									<Button
+										title="Click to change status"
+										className="cursor-pointer select-none border-none focus-visible:ring-0 transition-transform bg-(--bg-secondary) hover:bg-(--bg-secondary) outline-none inline-flex items-center gap-1"
+									>
+										<StatusBadge status={todo.status} />
+									</Button>
+								</DropdownMenuTrigger>
+								<DropdownMenuContent
+									align="start"
+									style={{
+										backgroundColor: "var(--bg)",
+										borderColor: "var(--border)",
+										color: "var(--text)",
+									}}
+								>
+									<DropdownMenuItem
+										onClick={() => onUpdateTodo({ status: "IN_PROGRESS" })}
+										className="text-xs cursor-pointer flex items-center gap-2"
+									>
+										<span className="h-2 w-2 rounded-full bg-(--link)" />
+										In Progress
+									</DropdownMenuItem>
+									<DropdownMenuItem
+										onClick={() => onUpdateTodo({ status: "LATE" })}
+										className="text-xs cursor-pointer flex items-center gap-2"
+									>
+										<span className="h-2 w-2 rounded-full bg-red-500" />
+										Late
+									</DropdownMenuItem>
+									<DropdownMenuItem
+										onClick={() => onUpdateTodo({ status: "COMPLETED" })}
+										className="text-xs cursor-pointer flex items-center gap-2"
+									>
+										<span className="h-2 w-2 rounded-full bg-emerald-500" />
+										Completed
+									</DropdownMenuItem>
+								</DropdownMenuContent>
+							</DropdownMenu>
 						</div>
 					</div>
+				</div>
 
-					<div className="hidden shrink-0 items-center gap-1.5 lg:flex">
-						{todo.tags?.slice(0, 3).map((item) => (
-							<TagBadge key={item.tagId} name={item.tag?.name} />
-						))}
-						<PriorityMenu
-							priority={todo.priority}
-							disabled={completed}
-							onChange={(priority) => onUpdateTodo({ priority })}
-						/>
-						<StatusBadge status={todo.status} />
-
-						<Button
-							variant="ghost"
-							size="icon"
-							className="h-8 w-8 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
-							onClick={() => {
-								setModalTitle(todo.title);
-								setModalDesc(todo.description ?? "");
-								setModalPriority(todo.priority);
-								const d = todo.dueDate ? new Date(todo.dueDate) : null;
-								setModalDate(d);
-								setModalTime(d ? d.toTimeString().slice(0, 5) : "");
-								setIsDetailsModalOpen(true);
-							}}
-							title="Edit task details"
-						>
-							<Pencil className="h-4 w-4" />
-						</Button>
-					</div>
+				{/* Edit button container displayed consistently on the right */}
+				<div className="shrink-0 items-center gap-1.5 flex">
+					<Button
+						variant="ghost"
+						size="icon"
+						className="h-8 w-8 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+						onClick={() => {
+							setModalTitle(todo.title);
+							setModalDesc(todo.description ?? "");
+							setModalPriority(todo.priority);
+							const d = todo.dueDate ? new Date(todo.dueDate) : null;
+							setModalDate(d);
+							setModalTime(d ? d.toTimeString().slice(0, 5) : "");
+							setIsDetailsModalOpen(true);
+						}}
+						title="Edit task details"
+					>
+						<Pencil className="h-4 w-4" />
+					</Button>
 				</div>
 			</div>
 
@@ -1708,7 +1775,7 @@ function TodoRow({
 					</div>
 					<DialogFooter>
 						<Button
-							className="border border-red-500 bg-(--bg-secondary) text-red-500 hover:bg-red-500 hover:text-(--text)"
+							variant="outline"
 							onClick={() => setIsDetailsModalOpen(false)}
 						>
 							Cancel
