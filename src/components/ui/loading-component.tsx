@@ -1,5 +1,4 @@
 /** biome-ignore-all lint/a11y/noSvgWithoutTitle: <explanation> */
-``
 export function PendingComponent() {
 	return (
 		<div

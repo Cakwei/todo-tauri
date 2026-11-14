@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { invoke } from "@tauri-apps/api/core";
-import { Store } from "@tauri-apps/plugin-store";
+import { listen } from "@tauri-apps/api/event";
 import { isAxiosError } from "axios";
 import {
 	CalendarDays,
@@ -20,29 +20,33 @@ import {
 	ChevronRight,
 	Circle,
 	Clock,
-	Clock3,
+	Cloud,
+	CloudOff,
 	Folder,
 	GripVertical,
 	Inbox,
 	Menu,
+	Moon,
 	MoreHorizontal,
 	Paperclip,
 	Pencil,
 	Pin,
 	Plus,
+	RefreshCw,
 	Search,
+	Sun,
 	Tag as TagIcon,
-	TrendingUp,
+	Trash2,
 	X,
 } from "lucide-react";
-import {
-	type Dispatch,
-	type ReactNode,
-	type SetStateAction,
-	useRef,
-	useState,
-} from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { z } from "zod";
+import {
+	CreateProjectDialog,
+	CreateTagDialog,
+} from "#/components/todo/ManageProjectsTagsDialog";
+import { TodoDetailsDialog } from "#/components/todo/TodoDetailsDialog";
+import { TodoInspector } from "#/components/todo/TodoInspector";
 import { Calendar } from "#/components/ui/calendar";
 import {
 	Popover,
@@ -56,6 +60,33 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "#/components/ui/select";
+import {
+	checkAndNotifyDueTodos,
+	ensureNotificationPermission,
+} from "#/lib/notifications";
+import { useTheme } from "#/lib/theme";
+import {
+	cacheProjectsFromServer,
+	cacheTagsFromServer,
+	cacheTodosFromServer,
+	deleteOfflineProject,
+	deleteOfflineTag,
+	enqueueMutation,
+	flushSyncOutbox,
+	getOfflineProjects,
+	getOfflineStats,
+	getOfflineTags,
+	getOfflineTodos,
+	getPendingOutboxCount,
+	type OfflineTodo,
+	reorderOfflineTodos,
+	softDeleteOfflineTodo,
+	upsertOfflineProject,
+	upsertOfflineTag,
+	upsertOfflineTodo,
+} from "#/lib/offline-db";
+import { deleteSecureToken } from "#/lib/secure-token";
+import { registerQuickCaptureShortcut } from "#/lib/shortcuts";
 import { axios } from "#/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -123,14 +154,7 @@ const DESCRIPTION_MAX_LENGTH = 5000;
 
 export const priorityEnum = z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]);
 
-export const todoStatusEnum = z.enum([
-	"BACKLOG",
-	"TODO",
-	"IN_PROGRESS",
-	"IN_REVIEW",
-	"COMPLETED",
-	"CANCELLED",
-]);
+export const todoStatusEnum = z.enum(["IN_PROGRESS", "LATE", "COMPLETED"]);
 
 export const createTodoSchema = z.object({
 	title: z
@@ -145,7 +169,7 @@ export const createTodoSchema = z.object({
 		.max(DESCRIPTION_MAX_LENGTH, "Description is too long")
 		.optional()
 		.nullable(),
-	status: todoStatusEnum.optional().default("TODO"),
+	status: todoStatusEnum.optional().default("IN_PROGRESS"),
 	priority: priorityEnum.optional().default("MEDIUM"),
 	projectId: z.string().optional().nullable(),
 	parentId: z.string().optional().nullable(),
@@ -160,11 +184,6 @@ type CreateTaskDialogProps = {
 	onOpenChange: (open: boolean) => void;
 	error: string | null;
 	pending: boolean;
-	title: string;
-	description: string;
-	onTitleChange: Dispatch<SetStateAction<string>>;
-	onDescriptionChange: Dispatch<SetStateAction<string>>;
-	setNewTitle: Dispatch<SetStateAction<string>>;
 	onSubmit: (values: FormValues) => void;
 	onErrorClear: () => void;
 	projects?: { id: string; name: string }[];
@@ -183,6 +202,7 @@ const todoSearchSchema = z.object({
 	search: z.string().optional().catch(""),
 	tab: z.string().catch("inbox"),
 	projectId: z.string().optional(),
+	tagId: z.string().optional(),
 });
 
 type TodoSearchParams = z.infer<typeof todoSearchSchema>;
@@ -196,15 +216,17 @@ const wifiConnectionQueryOptions = () =>
 	queryOptions({
 		queryKey: ["connection"],
 		queryFn: async () => {
-			const online = await invoke("is_online");
-			if (online) {
-				console.log("Connected to the internet!");
-			} else {
-				console.log("No internet connection.");
+			if (typeof navigator !== "undefined" && !navigator.onLine) {
+				return false;
 			}
-			return [];
+			try {
+				const healthUrl = `${import.meta.env.VITE_API_URL}/api/health`;
+				return await invoke<boolean>("is_online", { url: healthUrl });
+			} catch {
+				return typeof navigator !== "undefined" ? navigator.onLine : true;
+			}
 		},
-		refetchInterval: 5000,
+		refetchInterval: 15_000,
 	});
 
 const fetchTodoQueryOptions = ({
@@ -213,16 +235,18 @@ const fetchTodoQueryOptions = ({
 	search,
 	tab,
 	projectId,
+	tagId,
 }: TodoSearchParams) =>
 	queryOptions({
-		queryKey: ["todos", page, limit, search, tab, projectId],
-		queryFn: () => fetchTodosApi({ page, limit, search, tab, projectId }),
+		queryKey: ["todos", page, limit, search, tab, projectId, tagId],
+		queryFn: () =>
+			fetchTodosApi({ page, limit, search, tab, projectId, tagId }),
 		placeholderData: (previousData) => previousData,
 		retry: (failureCount, error) => {
 			console.error(error);
-			return failureCount < 2;
+			return failureCount < 1;
 		},
-		refetchInterval: 5000,
+		refetchInterval: 30_000,
 	});
 
 async function fetchTodosApi({
@@ -231,77 +255,103 @@ async function fetchTodosApi({
 	search,
 	tab,
 	projectId,
+	tagId,
 }: TodoSearchParams) {
+	const status =
+		tab === "completed"
+			? "COMPLETED"
+			: tab === "today"
+				? "IN_PROGRESS"
+				: undefined;
+
 	try {
 		const response = await axios.get("/todos", {
 			params: {
-				page: page,
-				limit: limit,
+				page,
+				limit,
 				search: search || undefined,
-				status:
-					tab === "completed"
-						? "COMPLETED"
-						: tab === "today"
-							? "TODO"
-							: undefined,
+				status,
 				projectId: projectId || undefined,
+				tagId: tagId || undefined,
 			},
 		});
 
-		const rawData = response.data || [];
+		const rawData = response.data || { data: [], totalCount: 0, totalPages: 1 };
 
 		if (rawData.data && Array.isArray(rawData.data)) {
 			rawData.data.sort(
 				(a: Todo, b: Todo) => (a.reorderIndex ?? 0) - (b.reorderIndex ?? 0),
 			);
+			await cacheTodosFromServer(rawData.data);
 		}
 
 		return rawData;
 	} catch (e) {
-		console.error("Error @ fetchTodosApi", e);
-		return { data: [], totalCount: 0, totalPages: 1 };
+		console.warn("fetchTodosApi offline fallback:", e);
+		return await getOfflineTodos({
+			page,
+			limit,
+			search,
+			status,
+			projectId,
+			tagId,
+		});
 	}
 }
 
 async function fetchProjectsApi() {
 	try {
 		const response = await axios.get("/projects");
-		return response.data || [];
+		const data = response.data || [];
+		await cacheProjectsFromServer(data);
+		return data;
 	} catch (e) {
-		console.error("fetchProjectsApi", e);
+		console.warn("fetchProjectsApi offline fallback:", e);
+		return await getOfflineProjects();
 	}
 }
 
 async function fetchTagsApi() {
 	try {
 		const response = await axios.get("/tags");
-		return response.data || [];
+		const data = response.data || [];
+		await cacheTagsFromServer(data);
+		return data;
 	} catch (e) {
-		console.error("fetchTagsApi", e);
+		console.warn("fetchTagsApi offline fallback:", e);
+		return await getOfflineTags();
 	}
 }
 
 async function fetchStatsApi() {
 	try {
 		const response = await axios.get("/todos/stats");
-		return response.data || [];
+		return (
+			response.data || {
+				data: { total: 0, completionRate: 0, remainingMinutes: 0 },
+			}
+		);
 	} catch (e) {
-		console.error("fetchStatsApi @", e);
+		console.warn("fetchStatsApi offline fallback:", e);
+		const offline = await getOfflineStats();
+		return { data: offline };
 	}
 }
 
 function Dashboard() {
 	const { queryClient } = Route.useRouteContext();
 	const navigate = Route.useNavigate();
-	const { page, limit, search, tab, projectId } = Route.useSearch();
+	const { page, limit, search, tab, projectId, tagId } = Route.useSearch();
 
 	const [mobileOpen, setMobileOpen] = useState(false);
 
 	const [isCreateOpen, setIsCreateOpen] = useState(false);
-	const [newTitle, setNewTitle] = useState("");
-	const [newDescription, setNewDescription] = useState("");
+	const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
+	const [isManageTagsOpen, setIsManageTagsOpen] = useState(false);
 	const [formError, setFormError] = useState<string | null>(null);
 	const [searchTodoValue, setSearchTodoValue] = useState("");
+	const [pendingSyncCount, setPendingSyncCount] = useState(0);
+	const [isSyncing, setIsSyncing] = useState(false);
 
 	const searchTodoDebounceFn = useDebouncedCallback(
 		async (query: string) => {
@@ -327,34 +377,109 @@ function Dashboard() {
 
 	const isReordering = useIsMutating({ mutationKey: ["reorder-todos"] }) > 0;
 
+	const { data: isOnline = true } = useQuery(wifiConnectionQueryOptions());
+
+	const refreshPendingCount = async () => {
+		setPendingSyncCount(await getPendingOutboxCount());
+	};
+
+	const runSync = async () => {
+		if (isSyncing) return;
+		setIsSyncing(true);
+		try {
+			await flushSyncOutbox(axios);
+			await refreshPendingCount();
+			await queryClient.invalidateQueries({ queryKey: ["todos"] });
+			await queryClient.invalidateQueries({ queryKey: ["projects"] });
+			await queryClient.invalidateQueries({ queryKey: ["tags"] });
+			await queryClient.invalidateQueries({ queryKey: ["todo-stats"] });
+		} catch (e) {
+			console.warn("Outbox sync failed (will retry when online):", e);
+		} finally {
+			setIsSyncing(false);
+		}
+	};
+
+	const prevOnlineRef = useRef<boolean>(isOnline);
+	useEffect(() => {
+		void refreshPendingCount();
+		if (isOnline && !prevOnlineRef.current) {
+			void runSync();
+		} else if (isOnline) {
+			void getPendingOutboxCount().then((cnt) => {
+				if (cnt > 0) void runSync();
+			});
+		}
+		prevOnlineRef.current = isOnline;
+	}, [isOnline]);
+
+	useEffect(() => {
+		const onOnline = () => {
+			void queryClient.invalidateQueries({ queryKey: ["connection"] });
+			void runSync();
+		};
+		window.addEventListener("online", onOnline);
+		return () => window.removeEventListener("online", onOnline);
+	}, []);
+
+	useEffect(() => {
+		let unlistenTray: (() => void) | undefined;
+		let unregisterShortcut: (() => void) | undefined;
+
+		void listen("quick-capture", () => {
+			setIsCreateOpen(true);
+		}).then((fn) => {
+			unlistenTray = fn;
+		});
+
+		void registerQuickCaptureShortcut(() => {
+			setIsCreateOpen(true);
+		}).then((fn) => {
+			unregisterShortcut = fn;
+		});
+
+		return () => {
+			unlistenTray?.();
+			unregisterShortcut?.();
+		};
+	}, []);
+
 	const {
 		data: todosRes,
 		isPending,
 		isPlaceholderData,
 	} = useQuery({
-		...fetchTodoQueryOptions({ page, limit, search, tab, projectId }),
-		refetchInterval: isReordering ? false : 5000,
+		...fetchTodoQueryOptions({ page, limit, search, tab, projectId, tagId }),
+		refetchInterval: isReordering ? false : 30_000,
 	});
 
-	useQuery(wifiConnectionQueryOptions());
+	useEffect(() => {
+		const list = todosRes?.data;
+		if (Array.isArray(list) && list.length > 0) {
+			void checkAndNotifyDueTodos(list);
+		}
+	}, [todosRes?.data]);
 
 	const { data: projectsRes } = useQuery({
 		queryKey: ["projects"],
 		queryFn: fetchProjectsApi,
-		refetchInterval: 5000,
+		staleTime: 60_000,
 	});
 
 	const { data: tagsRes } = useQuery({
 		queryKey: ["tags"],
 		queryFn: fetchTagsApi,
-		refetchInterval: 5000,
+		staleTime: 60_000,
 	});
 
 	const { data: statsRes } = useQuery({
 		queryKey: ["todo-stats"],
 		queryFn: fetchStatsApi,
-		refetchInterval: 5000,
+		staleTime: 30_000,
 	});
+
+	const isNetworkFailure = (err: unknown) =>
+		!isOnline || (isAxiosError(err) && !err.response);
 
 	const updateTodoMutation = useMutation({
 		mutationFn: async ({
@@ -365,9 +490,61 @@ function Dashboard() {
 			title?: string;
 			description?: string | null;
 			priority?: Todo["priority"];
+			status?: Todo["status"];
+			dueDate?: Date | null;
+			reminderAt?: Date | null;
+			recurrence?: string | null;
+			estimatedMinutes?: number | null;
+			actualMinutes?: number | null;
+			isPinned?: boolean;
+			projectId?: string | null;
 		}) => {
-			const response = await axios.patch(`/todos/${id}`, payload);
-			return response.data;
+			const serializedPayload = {
+				...payload,
+				dueDate:
+					payload.dueDate !== undefined
+						? payload.dueDate
+							? payload.dueDate.toISOString()
+							: null
+						: undefined,
+				reminderAt:
+					payload.reminderAt !== undefined
+						? payload.reminderAt
+							? payload.reminderAt.toISOString()
+							: null
+						: undefined,
+			};
+
+			try {
+				if (!isOnline) throw new Error("OFFLINE");
+				const response = await axios.patch(`/todos/${id}`, payload);
+				return response.data;
+			} catch (err) {
+				if (
+					isNetworkFailure(err) ||
+					(err instanceof Error && err.message === "OFFLINE")
+				) {
+					const existing = (todosRes?.data ?? []).find(
+						(t: Todo) => t.id === id,
+					);
+					if (existing) {
+						await upsertOfflineTodo({
+							...(existing as unknown as OfflineTodo),
+							...serializedPayload,
+							updatedAt: new Date().toISOString(),
+						});
+					}
+					await enqueueMutation({
+						entityType: "todo",
+						entityId: id,
+						operation: "UPDATE",
+						payload: serializedPayload,
+					});
+					await refreshPendingCount();
+					return { success: true, offline: true };
+				}
+				throw err;
+			}
 		},
 		onMutate: async ({ id, ...payload }) => {
 			await queryClient.cancelQueries({ queryKey: ["todos"] });
@@ -408,14 +585,34 @@ function Dashboard() {
 		},
 		onSettled: () => {
 			queryClient.invalidateQueries({ queryKey: ["todos"] });
+			queryClient.invalidateQueries({ queryKey: ["todo-stats"] });
 		},
 	});
 
 	const reorderTodosMutation = useMutation({
 		mutationKey: ["reorder-todos"],
 		mutationFn: async (orderedIds: string[]) => {
-			const response = await axios.post("/todos/reorder", { orderedIds });
-			return response.data;
+			try {
+				if (!isOnline) throw new Error("OFFLINE");
+				const response = await axios.post("/todos/reorder", { orderedIds });
+				return response.data;
+			} catch (err) {
+				if (
+					isNetworkFailure(err) ||
+					(err instanceof Error && err.message === "OFFLINE")
+				) {
+					await reorderOfflineTodos(orderedIds);
+					await enqueueMutation({
+						entityType: "todo",
+						entityId: orderedIds[0] ?? "batch",
+						operation: "REORDER",
+						payload: { orderedIds },
+					});
+					await refreshPendingCount();
+					return { success: true, offline: true };
+				}
+				throw err;
+			}
 		},
 		onMutate: async (orderedIds) => {
 			await queryClient.cancelQueries({ queryKey: ["todos"] });
@@ -466,19 +663,54 @@ function Dashboard() {
 	const createTodoMutation = useMutation({
 		mutationFn: async (payload: FormValues) => {
 			const validated = createTodoSchema.parse(payload);
-
-			const response = await axios.post("/todos", {
+			const id = crypto.randomUUID();
+			const body = {
+				id,
 				title: validated.title,
 				description: validated.description || undefined,
 				priority: validated.priority,
 				status: validated.status,
-				projectId: validated.projectId,
-				parentId: validated.parentId,
-				dueDate: validated.dueDate,
-				estimatedMinutes: validated.estimatedMinutes,
-			});
+				projectId: validated.projectId ?? undefined,
+				parentId: validated.parentId ?? undefined,
+				dueDate: validated.dueDate
+					? validated.dueDate.toISOString()
+					: undefined,
+				estimatedMinutes: validated.estimatedMinutes ?? undefined,
+			};
 
-			return response.data;
+			try {
+				if (!isOnline) throw new Error("OFFLINE");
+				const response = await axios.post("/todos", body);
+				return response.data;
+			} catch (err) {
+				if (
+					isNetworkFailure(err) ||
+					(err instanceof Error && err.message === "OFFLINE")
+				) {
+					await upsertOfflineTodo({
+						id,
+						title: validated.title,
+						description: validated.description ?? null,
+						status: validated.status,
+						priority: validated.priority,
+						reorderIndex: 0,
+						projectId: validated.projectId ?? null,
+						parentId: validated.parentId ?? null,
+						dueDate: validated.dueDate ? validated.dueDate.toISOString() : null,
+						estimatedMinutes: validated.estimatedMinutes ?? null,
+						updatedAt: new Date().toISOString(),
+					});
+					await enqueueMutation({
+						entityType: "todo",
+						entityId: id,
+						operation: "CREATE",
+						payload: body,
+					});
+					await refreshPendingCount();
+					return { success: true, offline: true };
+				}
+				throw err;
+			}
 		},
 
 		onSuccess: () => {
@@ -486,8 +718,6 @@ function Dashboard() {
 			queryClient.invalidateQueries({ queryKey: ["todo-stats"] });
 
 			setIsCreateOpen(false);
-			setNewTitle("");
-			setNewDescription("");
 			setFormError(null);
 		},
 
@@ -511,16 +741,45 @@ function Dashboard() {
 				status: nextStatus,
 			});
 
-			const response = await axios.patch(`/todos/${validated.id}`, {
-				status: validated.status,
-			});
-
-			return response.data;
+			try {
+				if (!isOnline) throw new Error("OFFLINE");
+				const response = await axios.patch(`/todos/${validated.id}`, {
+					status: validated.status,
+				});
+				return response.data;
+			} catch (err) {
+				if (
+					isNetworkFailure(err) ||
+					(err instanceof Error && err.message === "OFFLINE")
+				) {
+					const existing = (todosRes?.data ?? []).find(
+						(t: Todo) => t.id === id,
+					);
+					if (existing) {
+						await upsertOfflineTodo({
+							...(existing as unknown as OfflineTodo),
+							status: validated.status,
+							updatedAt: new Date().toISOString(),
+						});
+					}
+					await enqueueMutation({
+						entityType: "todo",
+						entityId: validated.id,
+						operation: "UPDATE",
+						payload: { status: validated.status },
+					});
+					await refreshPendingCount();
+					return { success: true, offline: true };
+				}
+				throw err;
+			}
 		},
 		onMutate: async ({ id, status }) => {
 			await queryClient.cancelQueries({ queryKey: ["todos"] });
-			const previousTodos = queryClient.getQueryData(["todos"]);
-			const nextStatus = status === "COMPLETED" ? "TODO" : "COMPLETED";
+			const previousQueries = queryClient.getQueriesData({
+				queryKey: ["todos"],
+			});
+			const nextStatus = status === "COMPLETED" ? "IN_PROGRESS" : "COMPLETED";
 
 			queryClient.setQueriesData({ queryKey: ["todos"] }, (old: any) => {
 				if (!old) return old;
@@ -543,16 +802,210 @@ function Dashboard() {
 				return old;
 			});
 
-			return { previousTodos };
+			return { previousQueries };
 		},
 		onError: (_err, _variables, context) => {
-			if (context?.previousTodos) {
-				queryClient.setQueryData(["todos"], context.previousTodos);
+			if (context?.previousQueries) {
+				context.previousQueries.forEach(([queryKey, data]) => {
+					queryClient.setQueryData(queryKey, data);
+				});
 			}
 		},
 		onSettled: () => {
 			queryClient.invalidateQueries({ queryKey: ["todos"] });
 			queryClient.invalidateQueries({ queryKey: ["todo-stats"] });
+		},
+	});
+
+	const deleteTodoMutation = useMutation({
+		mutationFn: async (id: string) => {
+			try {
+				if (!isOnline) throw new Error("OFFLINE");
+				await axios.delete(`/todos/${id}`);
+			} catch (err) {
+				if (
+					isNetworkFailure(err) ||
+					(err instanceof Error && err.message === "OFFLINE")
+				) {
+					await softDeleteOfflineTodo(id);
+					await enqueueMutation({
+						entityType: "todo",
+						entityId: id,
+						operation: "DELETE",
+						payload: {},
+					});
+					await refreshPendingCount();
+					return;
+				}
+				throw err;
+			}
+		},
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
+			queryClient.invalidateQueries({ queryKey: ["todo-stats"] });
+		},
+	});
+
+	const createProjectMutation = useMutation({
+		mutationFn: async (data: { name: string; color: string }) => {
+			const id = crypto.randomUUID();
+			try {
+				if (!isOnline) throw new Error("OFFLINE");
+				await axios.post("/projects", { id, ...data });
+			} catch (err) {
+				if (
+					isNetworkFailure(err) ||
+					(err instanceof Error && err.message === "OFFLINE")
+				) {
+					await upsertOfflineProject({ id, ...data });
+					await enqueueMutation({
+						entityType: "project",
+						entityId: id,
+						operation: "CREATE",
+						payload: data,
+					});
+					await refreshPendingCount();
+					return;
+				}
+				throw err;
+			}
+		},
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["projects"] });
+		},
+	});
+
+	const deleteProjectMutation = useMutation({
+		mutationFn: async (id: string) => {
+			try {
+				if (!isOnline) throw new Error("OFFLINE");
+				await axios.delete(`/projects/${id}`);
+			} catch (err) {
+				if (
+					isNetworkFailure(err) ||
+					(err instanceof Error && err.message === "OFFLINE")
+				) {
+					await deleteOfflineProject(id);
+					await enqueueMutation({
+						entityType: "project",
+						entityId: id,
+						operation: "DELETE",
+						payload: {},
+					});
+					await refreshPendingCount();
+					return;
+				}
+				throw err;
+			}
+		},
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["projects"] });
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
+		},
+	});
+
+	const createTagMutation = useMutation({
+		mutationFn: async (data: { name: string; color: string }) => {
+			const id = crypto.randomUUID();
+			try {
+				if (!isOnline) throw new Error("OFFLINE");
+				await axios.post("/tags", { id, ...data });
+			} catch (err) {
+				if (
+					isNetworkFailure(err) ||
+					(err instanceof Error && err.message === "OFFLINE")
+				) {
+					await upsertOfflineTag({ id, ...data });
+					await enqueueMutation({
+						entityType: "tag",
+						entityId: id,
+						operation: "CREATE",
+						payload: data,
+					});
+					await refreshPendingCount();
+					return;
+				}
+				throw err;
+			}
+		},
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["tags"] });
+		},
+	});
+
+	const deleteTagMutation = useMutation({
+		mutationFn: async (id: string) => {
+			try {
+				if (!isOnline) throw new Error("OFFLINE");
+				await axios.delete(`/tags/${id}`);
+			} catch (err) {
+				if (
+					isNetworkFailure(err) ||
+					(err instanceof Error && err.message === "OFFLINE")
+				) {
+					await deleteOfflineTag(id);
+					await enqueueMutation({
+						entityType: "tag",
+						entityId: id,
+						operation: "DELETE",
+						payload: {},
+					});
+					await refreshPendingCount();
+					return;
+				}
+				throw err;
+			}
+		},
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["tags"] });
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
+		},
+	});
+
+	const updateTodoTagsMutation = useMutation({
+		mutationFn: async ({
+			todoId,
+			tagIds,
+		}: {
+			todoId: string;
+			tagIds: string[];
+		}) => {
+			await axios.put(`/todos/${todoId}/tags`, { tagIds });
+		},
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
+		},
+	});
+
+	const addAttachmentMutation = useMutation({
+		mutationFn: async ({
+			todoId,
+			name,
+			url,
+		}: {
+			todoId: string;
+			name: string;
+			url: string;
+		}) => {
+			await axios.post(`/todos/${todoId}/attachments`, { name, url });
+		},
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
+		},
+	});
+
+	const deleteAttachmentMutation = useMutation({
+		mutationFn: async ({
+			todoId,
+			attachmentId,
+		}: {
+			todoId: string;
+			attachmentId: string;
+		}) => {
+			await axios.delete(`/todos/${todoId}/attachments/${attachmentId}`);
+		},
+		onSettled: () => {
+			queryClient.invalidateQueries({ queryKey: ["todos"] });
 		},
 	});
 
@@ -568,6 +1021,17 @@ function Dashboard() {
 	const tags: Tag[] = tagsRes ?? [];
 
 	const totalPages = Math.max(todosRes?.totalPages ?? 1, 1);
+
+	const { theme, toggleTheme } = useTheme();
+
+	useEffect(() => {
+		void ensureNotificationPermission();
+	}, []);
+
+	const [selectedTodoId, setSelectedTodoId] = useState<string | null>(null);
+	const [quickTitle, setQuickTitle] = useState("");
+	const selectedTodo =
+		todos.find((t) => t.id === selectedTodoId) ?? todos[0] ?? null;
 
 	const stats = statsRes?.data ?? {
 		total: 0,
@@ -602,18 +1066,23 @@ function Dashboard() {
 			}}
 		>
 			<aside
-				className="hidden lg:flex w-[240px] xl:w-[260px] shrink-0 border-r"
+				className="hidden lg:flex w-[68px] shrink-0 border-r"
 				style={{
 					backgroundColor: "var(--bg-secondary)",
 					borderColor: "var(--border)",
 				}}
 			>
-				<SidebarContent
-					searchParams={{ page, limit, search, tab, projectId }}
+				<IconRail
+					searchParams={{ page, limit, search, tab, projectId, tagId }}
 					updateSearchParams={updateSearchParams}
 					projects={projects}
 					tags={tags}
 					currentUser={currentUser}
+					onOpenCreateProject={() => setIsCreateProjectOpen(true)}
+					onDeleteProject={(id) => deleteProjectMutation.mutate(id)}
+					onOpenManageTags={() => setIsManageTagsOpen(true)}
+					theme={theme}
+					onToggleTheme={toggleTheme}
 				/>
 			</aside>
 
@@ -631,7 +1100,7 @@ function Dashboard() {
 					</SheetHeader>
 
 					<SidebarContent
-						searchParams={{ page, limit, search, tab, projectId }}
+						searchParams={{ page, limit, search, tab, projectId, tagId }}
 						updateSearchParams={(params) => {
 							updateSearchParams(params);
 							setMobileOpen(false);
@@ -639,6 +1108,9 @@ function Dashboard() {
 						projects={projects}
 						tags={tags}
 						currentUser={currentUser}
+						onOpenCreateProject={() => setIsCreateProjectOpen(true)}
+						onDeleteProject={(id) => deleteProjectMutation.mutate(id)}
+						onOpenManageTags={() => setIsManageTagsOpen(true)}
 					/>
 				</SheetContent>
 
@@ -690,13 +1162,72 @@ function Dashboard() {
 										variant="ghost"
 										size="icon"
 										className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2"
-										onClick={() => searchTodoDebounceFn("")}
+										onClick={() => {
+											setSearchTodoValue("");
+											searchTodoDebounceFn("");
+										}}
 									>
 										<X className="h-3.5 w-3.5" />
 									</Button>
 								)}
 							</div>
 						</div>
+
+						<Button
+							type="button"
+							variant="ghost"
+							size="sm"
+							onClick={() => {
+								if (isOnline && pendingSyncCount > 0) void runSync();
+							}}
+							title={
+								isOnline
+									? pendingSyncCount > 0
+										? "Click to sync pending changes"
+										: "Connected & synced"
+									: "Offline mode — changes saved locally"
+							}
+							className="h-8 shrink-0 gap-1.5 px-2.5 text-[11px]"
+							style={{ color: isOnline ? "#10b981" : "#f59e0b" }}
+						>
+							{isSyncing ? (
+								<RefreshCw className="h-3.5 w-3.5 animate-spin" />
+							) : isOnline ? (
+								<Cloud className="h-3.5 w-3.5" />
+							) : (
+								<CloudOff className="h-3.5 w-3.5" />
+							)}
+							<span className="hidden md:inline">
+								{isSyncing
+									? "Syncing..."
+									: isOnline
+										? pendingSyncCount > 0
+											? `Sync (${pendingSyncCount})`
+											: "Synced"
+										: pendingSyncCount > 0
+											? `Offline (${pendingSyncCount})`
+											: "Offline"}
+							</span>
+						</Button>
+
+						<Button
+							type="button"
+							variant="ghost"
+							size="icon"
+							onClick={toggleTheme}
+							title={
+								theme === "dark"
+									? "Switch to light mode"
+									: "Switch to dark mode"
+							}
+							className="h-9 w-9 shrink-0 rounded-md lg:hidden"
+						>
+							{theme === "dark" ? (
+								<Sun className="h-4 w-4 text-(--text-secondary)" />
+							) : (
+								<Moon className="h-4 w-4 text-(--text-secondary)" />
+							)}
+						</Button>
 
 						<Button
 							size="sm"
@@ -710,12 +1241,12 @@ function Dashboard() {
 					</header>
 
 					<main className="min-h-0 flex-1 overflow-y-auto">
-						<div className="mx-auto w-full max-w-[1500px] p-3 sm:p-5 lg:p-7">
-							<div className="mb-5 flex items-end justify-between gap-4">
+						<div className="mx-auto w-full max-w-[920px] p-4 sm:p-6 lg:p-8">
+							<div className="mb-6 flex items-center justify-between gap-4">
 								<div className="min-w-0">
-									<div className="flex items-center gap-2">
+									<div className="flex items-center gap-2.5">
 										<h1
-											className="truncate text-xl font-bold tracking-tight sm:text-2xl"
+											className="font-editorial truncate text-2xl font-semibold tracking-tight sm:text-3xl"
 											style={{ color: "var(--text)" }}
 										>
 											{pageTitle}
@@ -730,44 +1261,81 @@ function Dashboard() {
 									</p>
 								</div>
 
-								<div className="hidden shrink-0 text-right sm:block">
-									<p
-										className="text-lg font-semibold"
-										style={{ color: "var(--text)" }}
-									>
-										{todosRes?.totalCount ?? 0}
-									</p>
-									<p
-										className="text-[11px]"
-										style={{ color: "var(--text-secondary)" }}
-									>
-										tasks
-									</p>
+								{/* Circular Progress Ring + Inline Summary */}
+								<div className="flex shrink-0 items-center gap-3 rounded-2xl border border-(--border) bg-(--bg-secondary) px-3.5 py-2 shadow-2xs">
+									<div className="relative flex h-10 w-10 items-center justify-center">
+										<svg className="h-10 w-10 -rotate-90" viewBox="0 0 36 36">
+											<circle
+												cx="18"
+												cy="18"
+												r="15"
+												fill="none"
+												stroke="#EFECE6"
+												strokeWidth="3.5"
+											/>
+											<circle
+												cx="18"
+												cy="18"
+												r="15"
+												fill="none"
+												stroke="#52B788"
+												strokeWidth="3.5"
+												strokeLinecap="round"
+												strokeDasharray={`${Math.round((stats.completionRate / 100) * 94.25)} 94.25`}
+											/>
+										</svg>
+										<span className="absolute text-[10px] font-bold text-[#1B4332]">
+											{stats.completionRate}%
+										</span>
+									</div>
+									<div className="hidden sm:block text-left">
+										<p className="text-xs font-semibold text-(--text)">
+											{todosRes?.totalCount ?? 0} tasks
+										</p>
+										<p className="text-[11px] text-(--text-secondary)">
+											{Math.floor(stats.remainingMinutes / 60)}h{" "}
+											{stats.remainingMinutes % 60}m left
+										</p>
+									</div>
 								</div>
 							</div>
 
-							<div className="mb-5 grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3">
-								<StatCard
-									title="Tasks"
-									value={todosRes?.totalCount ?? 0}
-									icon={<CheckSquare className="h-4 w-4 text-blue-500" />}
+							{/* Inline Quick-Add Bar */}
+							<form
+								onSubmit={(e) => {
+									e.preventDefault();
+									const trimmed = quickTitle.trim();
+									if (!trimmed) return;
+									createTodoMutation.mutate({
+										title: trimmed,
+										status: tab === "completed" ? "COMPLETED" : "IN_PROGRESS",
+										priority: "MEDIUM",
+										projectId: projectId || null,
+									});
+									setQuickTitle("");
+								}}
+								className="mb-4 flex items-center gap-2 rounded-2xl border border-(--border) bg-(--bg-secondary) px-3.5 py-2 shadow-2xs focus-within:border-[#1B4332]/50"
+							>
+								<Plus className="h-4 w-4 shrink-0 text-[#1B4332]" />
+								<Input
+									value={quickTitle}
+									onChange={(e) => setQuickTitle(e.target.value)}
+									placeholder="Quick add task... Press Enter"
+									className="h-8 border-0 bg-transparent px-1 text-sm shadow-none focus-visible:ring-0"
 								/>
-								<StatCard
-									title="Completion"
-									value={`${stats.completionRate}%`}
-									icon={<TrendingUp className="h-4 w-4 text-emerald-500" />}
-								/>
-								<StatCard
-									title="Remaining"
-									value={`${Math.floor(
-										stats.remainingMinutes / 60,
-									)}h ${stats.remainingMinutes % 60}m`}
-									icon={<Clock3 className="h-4 w-4 text-amber-500" />}
-								/>
-							</div>
+								{quickTitle.trim() && (
+									<Button
+										type="submit"
+										size="sm"
+										className="h-7 rounded-lg bg-[#1B4332] px-3 text-[11px] font-semibold text-white hover:bg-[#2D6A4F]"
+									>
+										Add
+									</Button>
+								)}
+							</form>
 
 							<Card
-								className="overflow-hidden gap-0 rounded-xl shadow-none"
+								className="overflow-hidden gap-0 rounded-md shadow-none"
 								style={{
 									backgroundColor: "var(--bg-secondary)",
 									borderColor: "var(--border)",
@@ -839,6 +1407,11 @@ function Dashboard() {
 																	>
 																		<TodoRow
 																			todo={todo}
+																			projects={projects}
+																			allTags={tags}
+																			isOnline={isOnline}
+																			isSelected={selectedTodo?.id === todo.id}
+																			onSelect={() => setSelectedTodoId(todo.id)}
 																			dragHandleProps={provided.dragHandleProps}
 																			onToggle={() =>
 																				debouncedToggle({
@@ -850,6 +1423,45 @@ function Dashboard() {
 																				updateTodoMutation.mutate({
 																					id: todo.id,
 																					...payload,
+																				})
+																			}
+																			onDeleteTodo={(id) =>
+																				deleteTodoMutation.mutate(id)
+																			}
+																			onUpdateTags={(todoId, tagIds) =>
+																				updateTodoTagsMutation.mutate({
+																					todoId,
+																					tagIds,
+																				})
+																			}
+																			onCreateSubtask={(parentId, title) =>
+																				createTodoMutation.mutate({
+																					title,
+																					parentId,
+																					status: "IN_PROGRESS",
+																					priority: "MEDIUM",
+																				})
+																			}
+																			onToggleSubtask={(sub) =>
+																				toggleStatusMutation.mutate({
+																					id: sub.id,
+																					status: sub.status,
+																				})
+																			}
+																			onAddAttachment={(todoId, name, url) =>
+																				addAttachmentMutation.mutate({
+																					todoId,
+																					name,
+																					url,
+																				})
+																			}
+																			onDeleteAttachment={(
+																				todoId,
+																				attachmentId,
+																			) =>
+																				deleteAttachmentMutation.mutate({
+																					todoId,
+																					attachmentId,
 																				})
 																			}
 																		/>
@@ -924,20 +1536,404 @@ function Dashboard() {
 				</div>
 			</Sheet>
 
+			{/* Column 3: Persistent Right Live Task Inspector */}
+			<aside
+				className="hidden xl:flex w-[390px] 2xl:w-[430px] shrink-0 flex-col border-l"
+				style={{
+					backgroundColor: "var(--bg-secondary)",
+					borderColor: "var(--border)",
+				}}
+			>
+				<TodoInspector
+					todo={selectedTodo as OfflineTodo | null}
+					allTags={tags}
+					isOnline={isOnline}
+					onSave={(id, payload) =>
+						updateTodoMutation.mutate({
+							id,
+							...payload,
+						})
+					}
+					onDelete={(id) => {
+						deleteTodoMutation.mutate(id);
+						if (selectedTodoId === id) {
+							setSelectedTodoId(null);
+						}
+					}}
+					onUpdateTags={(todoId, tagIds) =>
+						updateTodoTagsMutation.mutate({
+							todoId,
+							tagIds,
+						})
+					}
+					onCreateSubtask={(parentId, title) =>
+						createTodoMutation.mutate({
+							title,
+							parentId,
+							status: "IN_PROGRESS",
+							priority: "MEDIUM",
+						})
+					}
+					onToggleSubtask={(sub) =>
+						toggleStatusMutation.mutate({
+							id: sub.id,
+							status: sub.status,
+						})
+					}
+					onAddAttachment={(todoId, name, url) =>
+						addAttachmentMutation.mutate({
+							todoId,
+							name,
+							url,
+						})
+					}
+					onDeleteAttachment={(todoId, attachmentId) =>
+						deleteAttachmentMutation.mutate({
+							todoId,
+							attachmentId,
+						})
+					}
+				/>
+			</aside>
+
 			<CreateTaskDialog
 				open={isCreateOpen}
-				title={newTitle}
-				description={newDescription}
 				error={formError}
 				pending={createTodoMutation.isPending}
 				onOpenChange={setIsCreateOpen}
-				setNewTitle={setNewTitle}
-				onTitleChange={setNewTitle}
-				onDescriptionChange={setNewDescription}
 				onSubmit={(values) => createTodoMutation.mutate(values)}
 				onErrorClear={() => setFormError(null)}
 				projects={projects}
+				defaultProjectId={projectId}
 			/>
+
+			<CreateProjectDialog
+				open={isCreateProjectOpen}
+				onOpenChange={setIsCreateProjectOpen}
+				onCreate={(data) => createProjectMutation.mutate(data)}
+			/>
+
+			<CreateTagDialog
+				open={isManageTagsOpen}
+				onOpenChange={setIsManageTagsOpen}
+				tags={tags}
+				onCreate={(data) => createTagMutation.mutate(data)}
+				onDelete={(id) => deleteTagMutation.mutate(id)}
+			/>
+		</div>
+	);
+}
+
+function IconRail({
+	searchParams,
+	updateSearchParams,
+	projects,
+	tags,
+	currentUser,
+	onOpenCreateProject,
+	onDeleteProject,
+	onOpenManageTags,
+	theme,
+	onToggleTheme,
+}: {
+	searchParams: TodoSearchParams;
+	updateSearchParams: (params: Partial<TodoSearchParams>) => void;
+	projects: Project[];
+	tags: Tag[];
+	currentUser?: {
+		name?: string;
+		email?: string;
+	} | null;
+	onOpenCreateProject: () => void;
+	onDeleteProject: (id: string) => void;
+	onOpenManageTags: () => void;
+	theme: "light" | "dark";
+	onToggleTheme: () => void;
+}) {
+	const railBtnClass = (active?: boolean) =>
+		`flex h-10 w-10 items-center justify-center rounded-md transition-all ${
+			active
+				? "bg-[#1B4332] text-white shadow-sm"
+				: "text-(--text-secondary) hover:bg-(--bg-subtle) hover:text-(--text)"
+		}`;
+
+	return (
+		<div className="flex h-full w-full flex-col items-center justify-between py-4">
+			<div className="flex flex-col items-center gap-3">
+				{/* Brand Monogram */}
+				<div
+					className="mb-3 flex h-10 w-10 items-center justify-center rounded-md bg-[#1B4332] font-editorial text-base font-bold text-white shadow-sm"
+					title="Cakwei's TODO"
+				>
+					C
+				</div>
+
+				{/* Primary Views */}
+				<button
+					type="button"
+					title="Inbox"
+					onClick={() =>
+						updateSearchParams({
+							tab: "inbox",
+							projectId: undefined,
+							tagId: undefined,
+							page: 1,
+						})
+					}
+					className={railBtnClass(
+						(searchParams.tab === "inbox" || !searchParams.tab) &&
+							!searchParams.projectId &&
+							!searchParams.tagId,
+					)}
+				>
+					<Inbox className="h-4.5 w-4.5" />
+				</button>
+
+				<button
+					type="button"
+					title="Today"
+					onClick={() =>
+						updateSearchParams({
+							tab: "today",
+							projectId: undefined,
+							tagId: undefined,
+							page: 1,
+						})
+					}
+					className={railBtnClass(
+						searchParams.tab === "today" &&
+							!searchParams.projectId &&
+							!searchParams.tagId,
+					)}
+				>
+					<CalendarDays className="h-4.5 w-4.5" />
+				</button>
+
+				<button
+					type="button"
+					title="Completed"
+					onClick={() =>
+						updateSearchParams({
+							tab: "completed",
+							projectId: undefined,
+							tagId: undefined,
+							page: 1,
+						})
+					}
+					className={railBtnClass(
+						searchParams.tab === "completed" &&
+							!searchParams.projectId &&
+							!searchParams.tagId,
+					)}
+				>
+					<CheckCircle2 className="h-4.5 w-4.5" />
+				</button>
+
+				<div className="my-1 h-px w-6 bg-(--border)" />
+
+				{/* Projects Popover */}
+				<Popover>
+					<PopoverTrigger asChild>
+						<button
+							type="button"
+							title="Projects"
+							className={railBtnClass(Boolean(searchParams.projectId))}
+						>
+							<Folder className="h-4.5 w-4.5" />
+						</button>
+					</PopoverTrigger>
+					<PopoverContent
+						side="right"
+						align="start"
+						className="w-60 rounded-2xl border-(--border) bg-(--bg-secondary) p-3 shadow-lg"
+					>
+						<div className="mb-2 flex items-center justify-between">
+							<span className="text-[11px] font-semibold uppercase tracking-wider text-(--text-secondary)">
+								Projects
+							</span>
+							<button
+								type="button"
+								onClick={onOpenCreateProject}
+								className="rounded-lg p-1 text-[#1B4332] hover:bg-(--bg-subtle)"
+								title="New project"
+							>
+								<Plus className="h-3.5 w-3.5" />
+							</button>
+						</div>
+						{projects.length === 0 ? (
+							<p className="py-2 text-xs text-(--text-secondary)">
+								No projects yet
+							</p>
+						) : (
+							<div className="space-y-1 max-h-60 overflow-y-auto">
+								{projects.map((project) => {
+									const active = searchParams.projectId === project.id;
+									return (
+										<div
+											key={project.id}
+											className="group flex items-center justify-between rounded-md hover:bg-(--bg-subtle)"
+										>
+											<button
+												type="button"
+												onClick={() =>
+													updateSearchParams({
+														projectId: active ? undefined : project.id,
+														tagId: undefined,
+														page: 1,
+													})
+												}
+												className={`flex flex-1 items-center gap-2 px-2.5 py-1.5 text-left text-xs ${
+													active
+														? "font-semibold text-[#1B4332]"
+														: "text-(--text)"
+												}`}
+											>
+												<span
+													className="h-2 w-2 rounded-full"
+													style={{
+														backgroundColor: project.color || "#52B788",
+													}}
+												/>
+												<span className="truncate">{project.name}</span>
+											</button>
+											<button
+												type="button"
+												onClick={() => onDeleteProject(project.id)}
+												className="hidden group-hover:flex p-1.5 text-[#D97757]"
+												title="Delete project"
+											>
+												<Trash2 className="h-3 w-3" />
+											</button>
+										</div>
+									);
+								})}
+							</div>
+						)}
+					</PopoverContent>
+				</Popover>
+
+				{/* Tags Popover */}
+				<Popover>
+					<PopoverTrigger asChild>
+						<button
+							type="button"
+							title="Tags"
+							className={railBtnClass(Boolean(searchParams.tagId))}
+						>
+							<TagIcon className="h-4.5 w-4.5" />
+						</button>
+					</PopoverTrigger>
+					<PopoverContent
+						side="right"
+						align="start"
+						className="w-60 rounded-2xl border-(--border) bg-(--bg-secondary) p-3 shadow-lg"
+					>
+						<div className="mb-2 flex items-center justify-between">
+							<span className="text-[11px] font-semibold uppercase tracking-wider text-(--text-secondary)">
+								Tags
+							</span>
+							<button
+								type="button"
+								onClick={onOpenManageTags}
+								className="rounded-lg p-1 text-[#1B4332] hover:bg-(--bg-subtle)"
+								title="Manage tags"
+							>
+								<Plus className="h-3.5 w-3.5" />
+							</button>
+						</div>
+						{tags.length === 0 ? (
+							<p className="py-2 text-xs text-(--text-secondary)">
+								No tags yet
+							</p>
+						) : (
+							<div className="flex flex-wrap gap-1.5">
+								{tags.map((tag) => {
+									const active = searchParams.tagId === tag.id;
+									return (
+										<button
+											type="button"
+											key={tag.id}
+											onClick={() =>
+												updateSearchParams({
+													tagId: active ? undefined : tag.id,
+													projectId: undefined,
+													page: 1,
+												})
+											}
+											className={`rounded-full px-2.5 py-1 text-[11px] font-medium border transition-colors ${
+												active
+													? "bg-[#1B4332] text-white border-[#1B4332]"
+													: "bg-(--bg) border-(--border) text-(--text-secondary) hover:text-(--text)"
+											}`}
+										>
+											#{tag.name}
+										</button>
+									);
+								})}
+							</div>
+						)}
+					</PopoverContent>
+				</Popover>
+			</div>
+
+			{/* Bottom Theme Toggle + User Avatar & Logout */}
+			<div className="flex flex-col items-center gap-3">
+				<button
+					type="button"
+					onClick={onToggleTheme}
+					title={
+						theme === "dark" ? "Switch to light mode" : "Switch to dark mode"
+					}
+					className={railBtnClass(false)}
+				>
+					{theme === "dark" ? (
+						<Sun className="h-4.5 w-4.5" />
+					) : (
+						<Moon className="h-4.5 w-4.5" />
+					)}
+				</button>
+
+				<DropdownMenu>
+				<DropdownMenuTrigger asChild>
+					<button
+						type="button"
+						title={currentUser?.name || "Account"}
+						className="flex h-9 w-9 items-center justify-center rounded-full border border-(--border) bg-(--bg) text-xs font-semibold text-[#1B4332] hover:bg-(--bg-subtle)"
+					>
+						{currentUser?.name?.slice(0, 2).toUpperCase() || "US"}
+					</button>
+				</DropdownMenuTrigger>
+				<DropdownMenuContent
+					side="right"
+					align="end"
+					className="border-(--border) bg-(--bg-secondary) text-(--text)"
+				>
+					<div className="px-2.5 py-1.5 border-b border-(--border)">
+						<p className="text-xs font-semibold">
+							{currentUser?.name || "User Account"}
+						</p>
+						<p className="text-[10px] text-(--text-secondary)">
+							{currentUser?.email || ""}
+						</p>
+					</div>
+					<DropdownMenuItem
+						className="text-[#D97757] focus:text-[#D97757]"
+						onClick={() =>
+							authClient.signOut({
+								fetchOptions: {
+									onSuccess: async () => {
+										await deleteSecureToken();
+										window.location.href = "/login";
+									},
+								},
+							})
+						}
+					>
+						Log out
+					</DropdownMenuItem>
+				</DropdownMenuContent>
+			</DropdownMenu>
+			</div>
 		</div>
 	);
 }
@@ -948,6 +1944,9 @@ function SidebarContent({
 	projects,
 	tags,
 	currentUser,
+	onOpenCreateProject,
+	onDeleteProject,
+	onOpenManageTags,
 }: {
 	searchParams: TodoSearchParams;
 	updateSearchParams: (params: Partial<TodoSearchParams>) => void;
@@ -957,6 +1956,9 @@ function SidebarContent({
 		name?: string;
 		email?: string;
 	} | null;
+	onOpenCreateProject: () => void;
+	onDeleteProject: (id: string) => void;
+	onOpenManageTags: () => void;
 }) {
 	const { queryClient } = Route.useRouteContext();
 	return (
@@ -990,11 +1992,16 @@ function SidebarContent({
 					<SidebarItem
 						icon={<Inbox className="h-4 w-4" />}
 						label="Inbox"
-						active={searchParams.tab === "inbox" && !searchParams.projectId}
+						active={
+							searchParams.tab === "inbox" &&
+							!searchParams.projectId &&
+							!searchParams.tagId
+						}
 						onClick={() =>
 							updateSearchParams({
 								tab: "inbox",
 								projectId: undefined,
+								tagId: undefined,
 								page: 1,
 							})
 						}
@@ -1009,6 +2016,7 @@ function SidebarContent({
 							updateSearchParams({
 								tab: "today",
 								projectId: undefined,
+								tagId: undefined,
 								page: 1,
 							});
 						}}
@@ -1023,6 +2031,7 @@ function SidebarContent({
 							updateSearchParams({
 								tab: "completed",
 								projectId: undefined,
+								tagId: undefined,
 								page: 1,
 							});
 							await queryClient.invalidateQueries({ queryKey: ["todos"] });
@@ -1033,6 +2042,16 @@ function SidebarContent({
 				<SidebarSection
 					title="Projects"
 					icon={<Folder className="h-3.5 w-3.5" />}
+					action={
+						<button
+							type="button"
+							onClick={onOpenCreateProject}
+							title="Add project"
+							className="rounded p-0.5 hover:bg-(--bg)"
+						>
+							<Plus className="h-3.5 w-3.5" />
+						</button>
+					}
 				>
 					{projects.length === 0 ? (
 						<p
@@ -1046,32 +2065,58 @@ function SidebarContent({
 							{projects.map((project) => {
 								const active = searchParams.projectId === project.id;
 								return (
-									<button
+									<div
 										key={project.id}
-										type="button"
-										onClick={() =>
-											updateSearchParams({
-												projectId: project.id,
-												tab: "inbox",
-												page: 1,
-											})
-										}
-										className="flex w-full min-w-0 items-center gap-2.5 rounded-sm p-2.5 h-[36px] text-left text-xs transition-colors"
+										className="group flex items-center gap-1 rounded-sm"
 										style={{
 											backgroundColor: active ? "var(--link)" : "",
-											color: "var(--text)",
 										}}
 									>
-										<ProjectDot color={project.color} />
-										<span className="truncate">{project.name}</span>
-									</button>
+										<button
+											type="button"
+											onClick={() =>
+												updateSearchParams({
+													projectId: project.id,
+													tagId: undefined,
+													tab: "inbox",
+													page: 1,
+												})
+											}
+											className="flex flex-1 min-w-0 items-center gap-2.5 p-2.5 h-[36px] text-left text-xs transition-colors"
+											style={{ color: "var(--text)" }}
+										>
+											<ProjectDot color={project.color} />
+											<span className="truncate">{project.name}</span>
+										</button>
+										<button
+											type="button"
+											onClick={() => onDeleteProject(project.id)}
+											title="Delete project"
+											className="hidden group-hover:flex p-1.5 mr-1 text-red-400 hover:text-red-500"
+										>
+											<Trash2 className="h-3 w-3" />
+										</button>
+									</div>
 								);
 							})}
 						</div>
 					)}
 				</SidebarSection>
 
-				<SidebarSection title="Tags" icon={<TagIcon className="h-3.5 w-3.5" />}>
+				<SidebarSection
+					title="Tags"
+					icon={<TagIcon className="h-3.5 w-3.5" />}
+					action={
+						<button
+							type="button"
+							onClick={onOpenManageTags}
+							title="Manage tags"
+							className="rounded p-0.5 hover:bg-(--bg)"
+						>
+							<Plus className="h-3.5 w-3.5" />
+						</button>
+					}
+				>
 					{tags.length === 0 ? (
 						<p
 							className="px-2 text-[11px]"
@@ -1081,14 +2126,28 @@ function SidebarContent({
 						</p>
 					) : (
 						<div className="flex flex-wrap gap-1.5 px-1">
-							{tags.map((tag) => (
-								<Badge
-									key={tag.id}
-									className="bg-(--bg-secondary) outline outline-(--link) text-(--link) rounded-full px-2 text-[10px] font-normal"
-								>
-									#{tag.name}
-								</Badge>
-							))}
+							{tags.map((tag) => {
+								const active = searchParams.tagId === tag.id;
+								return (
+									<Badge
+										key={tag.id}
+										onClick={() =>
+											updateSearchParams({
+												tagId: active ? undefined : tag.id,
+												projectId: undefined,
+												page: 1,
+											})
+										}
+										className={`cursor-pointer rounded-full px-2 text-[10px] font-normal ${
+											active
+												? "bg-(--link) text-white"
+												: "bg-(--bg-secondary) outline outline-(--link) text-(--link)"
+										}`}
+									>
+										#{tag.name}
+									</Badge>
+								);
+							})}
 						</div>
 					)}
 				</SidebarSection>
@@ -1138,9 +2197,7 @@ function SidebarContent({
 									authClient.signOut({
 										fetchOptions: {
 											onSuccess: async () => {
-												const store = await Store.load("app-settings.json");
-												await store.delete("better-auth.session_token");
-												await store.save();
+												await deleteSecureToken();
 												window.location.href = "/login";
 											},
 										},
@@ -1160,20 +2217,25 @@ function SidebarContent({
 function SidebarSection({
 	title,
 	icon,
+	action,
 	children,
 }: {
 	title: string;
 	icon: ReactNode;
+	action?: ReactNode;
 	children: ReactNode;
 }) {
 	return (
 		<section className="mt-7">
 			<div
-				className="mb-2 flex items-center gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wider"
+				className="mb-2 flex items-center justify-between px-2 text-[10px] font-semibold uppercase tracking-wider"
 				style={{ color: "var(--text-secondary)" }}
 			>
-				{icon}
-				<span>{title}</span>
+				<div className="flex items-center gap-1.5">
+					{icon}
+					<span>{title}</span>
+				</div>
+				{action}
 			</div>
 			{children}
 		</section>
@@ -1211,21 +2273,46 @@ function SidebarItem({
 function TodoRow({
 	todo,
 	projects = [],
+	allTags = [],
+	isOnline = true,
+	isSelected = false,
+	onSelect,
 	onToggle,
 	onUpdateTodo,
+	onDeleteTodo,
+	onUpdateTags,
+	onCreateSubtask,
+	onToggleSubtask,
+	onAddAttachment,
+	onDeleteAttachment,
 	dragHandleProps,
 }: {
 	todo: any;
 	projects?: { id: string; name: string }[];
+	allTags?: Tag[];
+	isOnline?: boolean;
+	isSelected?: boolean;
+	onSelect?: () => void;
 	onToggle: () => void;
 	onUpdateTodo: (payload: {
 		title?: string;
 		description?: string | null;
 		priority?: any;
 		dueDate?: Date | null;
+		reminderAt?: Date | null;
+		recurrence?: string | null;
+		estimatedMinutes?: number | null;
+		actualMinutes?: number | null;
+		isPinned?: boolean;
 		status?: any;
 		projectId?: string | null;
 	}) => void;
+	onDeleteTodo: (id: string) => void;
+	onUpdateTags: (todoId: string, tagIds: string[]) => void;
+	onCreateSubtask: (parentId: string, title: string) => void;
+	onToggleSubtask: (subtask: OfflineTodo) => void;
+	onAddAttachment: (todoId: string, name: string, url: string) => void;
+	onDeleteAttachment: (todoId: string, attachmentId: string) => void;
 	dragHandleProps?: any;
 }) {
 	const completed = todo.status === "COMPLETED";
@@ -1242,14 +2329,6 @@ function TodoRow({
 	);
 
 	const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
-	const [modalTitle, setModalTitle] = useState(todo.title);
-	const [modalDesc, setModalDesc] = useState(todo.description ?? "");
-	const [modalPriority, setModalPriority] = useState(todo.priority);
-	const [modalDate, setModalDate] = useState<Date | null>(initialDate);
-	const [modalTime, setModalTime] = useState<string>(
-		initialDate ? initialDate.toTimeString().slice(0, 5) : "",
-	);
-	const [isModalCalendarOpen, setIsModalCalendarOpen] = useState(false);
 
 	const titleRef = useRef<HTMLInputElement>(null);
 	const descRef = useRef<HTMLTextAreaElement>(null);
@@ -1310,34 +2389,18 @@ function TodoRow({
 		setIsEditingDueDate(false);
 	};
 
-	const handleSaveModal = () => {
-		let finalDate: Date | null = null;
-		if (modalDate) {
-			finalDate = new Date(modalDate);
-			if (modalTime) {
-				const [hours, minutes] = modalTime.split(":");
-				finalDate.setHours(parseInt(hours, 10), parseInt(minutes, 10), 0, 0);
-			} else {
-				finalDate.setHours(0, 0, 0, 0);
-			}
-		}
-
-		onUpdateTodo({
-			title: modalTitle.trim() || todo.title,
-			description: modalDesc.trim() || null,
-			priority: modalPriority,
-			dueDate: finalDate,
-		});
-		setIsDetailsModalOpen(false);
-	};
-
 	return (
 		<>
 			<div
-				className={`group relative border-b py-3.5 px-3 transition-colors sm:px-5 last:border-b-0 flex items-start justify-between gap-3 ${
+				onClick={onSelect}
+				className={`group relative cursor-pointer border-b py-3.5 px-3 transition-colors sm:px-5 last:border-b-0 flex items-start justify-between gap-3 ${
 					completed ? "opacity-60" : ""
+				} ${
+					isSelected
+						? "bg-[#EFECE6]/70 border-l-2 border-l-[#1B4332]"
+						: "hover:bg-(--bg)/60"
 				}`}
-				style={{ borderColor: "var(--border)" }}
+				style={{ borderBottomColor: "var(--border)" }}
 			>
 				<div className="flex min-w-0 items-start gap-2.5 sm:gap-3 flex-1">
 					<div
@@ -1642,15 +2705,7 @@ function TodoRow({
 						variant="ghost"
 						size="icon"
 						className="h-8 w-8 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
-						onClick={() => {
-							setModalTitle(todo.title);
-							setModalDesc(todo.description ?? "");
-							setModalPriority(todo.priority);
-							const d = todo.dueDate ? new Date(todo.dueDate) : null;
-							setModalDate(d);
-							setModalTime(d ? d.toTimeString().slice(0, 5) : "");
-							setIsDetailsModalOpen(true);
-						}}
+						onClick={() => setIsDetailsModalOpen(true)}
 						title="Edit task details"
 					>
 						<Pencil className="h-4 w-4" />
@@ -1658,138 +2713,20 @@ function TodoRow({
 				</div>
 			</div>
 
-			<Dialog open={isDetailsModalOpen} onOpenChange={setIsDetailsModalOpen}>
-				<DialogContent
-					className="sm:max-w-[425px]"
-					style={{
-						backgroundColor: "var(--bg-secondary)",
-						color: "var(--text)",
-					}}
-				>
-					<DialogHeader>
-						<DialogTitle>Edit Todo Details</DialogTitle>
-					</DialogHeader>
-					<div className="grid gap-4 py-4">
-						<div className="grid gap-2">
-							<Label
-								className="text-xs font-medium"
-								style={{ color: "var(--text-secondary)" }}
-							>
-								Title
-							</Label>
-							<Input
-								className="bg-(--bg) dark:bg-(--bg)"
-								value={modalTitle}
-								onChange={(e) => setModalTitle(e.target.value)}
-								maxLength={TITLE_MAX_LENGTH}
-							/>
-						</div>
-						<div className="grid gap-2">
-							<Label
-								className="text-xs font-medium"
-								style={{ color: "var(--text-secondary)" }}
-							>
-								Description
-							</Label>
-							<Textarea
-								value={modalDesc}
-								onChange={(e) => setModalDesc(e.target.value)}
-								maxLength={DESCRIPTION_MAX_LENGTH}
-								className="bg-(--bg) dark:bg-(--bg)"
-								rows={3}
-							/>
-						</div>
-
-						{/* Equal Sized Date & Time Row */}
-						<div className="grid grid-cols-2 gap-3">
-							<div className="grid gap-2">
-								<Label
-									className="text-xs font-medium"
-									style={{ color: "var(--text-secondary)" }}
-								>
-									Due Date
-								</Label>
-								<Popover
-									open={isModalCalendarOpen}
-									onOpenChange={setIsModalCalendarOpen}
-								>
-									<PopoverTrigger asChild>
-										<Button
-											variant="outline"
-											className="w-full justify-start text-left font-normal text-xs h-9"
-											style={{
-												backgroundColor: "var(--bg)",
-												borderColor: "var(--border)",
-												color: modalDate
-													? "var(--text)"
-													: "var(--text-secondary)",
-											}}
-										>
-											<CalendarDays className="mr-2 h-3.5 w-3.5 opacity-70" />
-											{modalDate ? modalDate.toLocaleDateString() : "Pick date"}
-										</Button>
-									</PopoverTrigger>
-									<PopoverContent
-										className="w-auto p-0 shadow-lg"
-										align="start"
-										style={{
-											backgroundColor: "var(--bg-secondary)",
-											borderColor: "var(--border)",
-										}}
-									>
-										<Calendar
-											mode="single"
-											selected={modalDate ?? undefined}
-											onSelect={(date) => {
-												setModalDate(date ?? null);
-												setIsModalCalendarOpen(false);
-											}}
-											className="rounded-md border p-3 "
-											style={{
-												backgroundColor: "var(--bg)",
-												color: "var(--text)",
-											}}
-										/>
-									</PopoverContent>
-								</Popover>
-							</div>
-
-							<div className="grid gap-2">
-								<Label
-									className="text-xs font-medium"
-									style={{ color: "var(--text-secondary)" }}
-								>
-									Time
-								</Label>
-								<div className="relative">
-									<Clock className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 opacity-70" />
-									<Input
-										type="time"
-										value={modalTime}
-										onChange={(e) => setModalTime(e.target.value)}
-										className="pl-8 text-xs h-9 bg-(--bg) dark:bg-(--bg)"
-									/>
-								</div>
-							</div>
-						</div>
-					</div>
-					<DialogFooter>
-						<Button
-							variant="outline"
-							onClick={() => setIsDetailsModalOpen(false)}
-						>
-							Cancel
-						</Button>
-						<Button
-							onClick={handleSaveModal}
-							style={{ backgroundColor: "var(--link)", color: "#ffffff" }}
-							className="hover:opacity-90"
-						>
-							Save Changes
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
+			<TodoDetailsDialog
+				open={isDetailsModalOpen}
+				onOpenChange={setIsDetailsModalOpen}
+				todo={todo}
+				allTags={allTags}
+				isOnline={isOnline}
+				onSave={(payload) => onUpdateTodo(payload)}
+				onDelete={onDeleteTodo}
+				onUpdateTags={onUpdateTags}
+				onCreateSubtask={onCreateSubtask}
+				onToggleSubtask={onToggleSubtask}
+				onAddAttachment={onAddAttachment}
+				onDeleteAttachment={onDeleteAttachment}
+			/>
 		</>
 	);
 }
@@ -1841,45 +2778,6 @@ function PriorityMenu({
 				))}
 			</DropdownMenuContent>
 		</DropdownMenu>
-	);
-}
-
-function StatCard({
-	title,
-	value,
-	icon,
-}: {
-	title: string;
-	value: string | number;
-	icon: ReactNode;
-}) {
-	return (
-		<Card
-			className="rounded-xl shadow-none h-25 flex justify-center"
-			style={{
-				backgroundColor: "var(--bg-secondary)",
-				borderColor: "var(--border)",
-			}}
-		>
-			<CardContent className="p-3 sm:p-4">
-				<div className="flex items-center justify-between gap-2">
-					<span
-						className="truncate text-[10px] font-medium uppercase tracking-wide sm:text-[11px]"
-						style={{ color: "var(--text-secondary)" }}
-					>
-						{title}
-					</span>
-					{icon}
-				</div>
-
-				<p
-					className="mt-1.5 text-base font-bold tracking-tight sm:text-xl"
-					style={{ color: "var(--text)" }}
-				>
-					{value}
-				</p>
-			</CardContent>
-		</Card>
 	);
 }
 
@@ -2064,9 +2962,13 @@ function CreateTaskDialog({
 				onOpenChange(value);
 				if (!value) {
 					onErrorClear();
+					setTitle("");
+					setDescription("");
+					setPriority("MEDIUM");
 					setValidationError(null);
 					setDueDate(null);
 					setDueTime("");
+					setProjectId(defaultProjectId || "");
 				}
 			}}
 		>

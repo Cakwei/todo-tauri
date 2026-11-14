@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
+import fastifyRedis from "@fastify/redis";
 import Fastify from "fastify";
 import { authRoutes } from "./api/auth/auth";
 import { healthRoutes } from "./api/health";
@@ -42,6 +43,9 @@ await server.register(cors, {
 	exposedHeaders: ["set-auth-token"],
 	maxAge: 86400,
 });
+
+// Redis
+await server.register(fastifyRedis, { client: redis });
 
 // Cookies
 await server.register(cookie);

@@ -9,7 +9,8 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
 		url: "/api/auth/*",
 		async handler(request, reply) {
 			try {
-				const url = new URL(request.url, `http://${request.headers.host}`);
+				const baseUrl = process.env.BETTER_AUTH_URL || "http://localhost:3001";
+				const url = new URL(request.url, baseUrl);
 				const headers = fromNodeHeaders(request.headers);
 				const req = new Request(url.toString(), {
 					method: request.method,

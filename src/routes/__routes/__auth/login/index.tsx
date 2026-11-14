@@ -1,5 +1,4 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Store } from "@tauri-apps/plugin-store";
 import {
 	AlertCircle,
 	ArrowLeft,
@@ -7,10 +6,10 @@ import {
 	Loader2,
 	Lock,
 	Mail,
-	User2,
 } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { authClient } from "#/lib/auth-client";
+import { setSecureToken } from "#/lib/secure-token";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -46,11 +45,9 @@ function Login() {
 				},
 				{
 					onSuccess: async (ctx) => {
-						const token = ctx.response.headers.get("set-auth-token") || ""; // get the token from the response headers
+						const token = ctx.response.headers.get("set-auth-token") || "";
 						if (token) {
-							const store = await Store.load("app-settings.json");
-							await store.set("better-auth.session_token", token);
-							await store.save();
+							await setSecureToken(token);
 						}
 						window.location.href = "/dashboard";
 					},
@@ -74,67 +71,80 @@ function Login() {
 	};
 
 	return (
-		<div className="relative flex flex-col h-screen w-screen bg-(--bg) text-(--text) select-none overflow-hidden font-sans">
-			<Button
-				onClick={() => navigate({ to: "/" })}
-				className="absolute top-5 bg-(--bg) hover:bg-(--bg-secondary) left-5 flex items-center gap-2 text-xs text-(--text-secondary) hover:text-(--text) transition-colors"
-			>
-				<ArrowLeft className="w-4 h-4" />
-				<span>Back</span>
-			</Button>
-			<main className="flex-1 flex flex-col items-center justify-center p-6 w-full">
-				<Card className="w-full max-w-sm bg-(--bg-secondary) border-(--border) text-(--text) shadow-2xl backdrop-blur-md rounded-2xl">
-					<CardHeader className="space-y-2 text-center pb-6">
-						<div className="mx-auto w-12 h-12 rounded-2xl bg-(--bg) border border-(--border) flex items-center justify-center mb-1">
-							<User2 className="w-6 h-6 text-(--link)" />
+		<div className="relative flex min-h-dvh w-full flex-col bg-(--bg) text-(--text) select-none overflow-hidden font-sans">
+			<header className="flex items-center justify-between px-6 py-5 sm:px-10">
+				<Button
+					type="button"
+					variant="ghost"
+					onClick={() => navigate({ to: "/" })}
+					className="flex items-center gap-2 rounded-full px-3.5 text-xs font-medium text-(--text-secondary) hover:bg-(--bg-subtle) hover:text-(--text)"
+				>
+					<ArrowLeft className="h-4 w-4" />
+					<span>Back to intro</span>
+				</Button>
+				<div className="flex items-center gap-2">
+					<div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#1B4332] text-white font-editorial font-bold text-xs">
+						C
+					</div>
+					<span className="font-editorial text-sm font-semibold text-(--text)">
+						Cakwei&apos;s TODO
+					</span>
+				</div>
+			</header>
+
+			<main className="flex flex-1 flex-col items-center justify-center px-6 pb-12 w-full">
+				<Card className="w-full max-w-md rounded-3xl border border-(--border) bg-(--bg-secondary) text-(--text) shadow-xl shadow-stone-900/5">
+					<CardHeader className="space-y-2 text-center pb-4 pt-8 px-8">
+						<div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-[#1B4332] text-white font-editorial text-xl font-bold shadow-sm mb-2">
+							C
 						</div>
-						<CardTitle className="text-2xl font-bold tracking-tight text-(--text)">
-							Welcome Back
+						<CardTitle className="font-editorial text-2xl font-semibold tracking-tight text-(--text)">
+							Welcome back
 						</CardTitle>
-						<CardDescription className="text-sm text-(--text-secondary)">
-							Sign in to sync your tasks and workspace across devices
+						<CardDescription className="text-xs sm:text-sm text-(--text-secondary)">
+							Sign in to sync your tasks and offline vault across devices
 						</CardDescription>
 					</CardHeader>
 
-					<CardContent className="space-y-4">
+					<CardContent className="space-y-5 px-8 pb-8">
 						<form onSubmit={handleEmailLogin} className="space-y-4">
 							{errorMessage && (
-								<div className="flex items-center gap-2.5 p-3 text-xs rounded-xl bg-red-500/10 text-red-400 border border-red-500/20">
-									<AlertCircle className="w-4 h-4 shrink-0" />
+								<div className="flex items-center gap-2.5 rounded-md border border-[#D97757]/30 bg-[#D97757]/10 p-3 text-xs text-[#B45337]">
+									<AlertCircle className="h-4 w-4 shrink-0" />
 									<span>{errorMessage}</span>
 								</div>
 							)}
 
-							<div className="space-y-2">
-								<Label className="text-xs uppercase font-semibold text-(--text-secondary) tracking-wider">
+							<div className="space-y-1.5">
+								<Label className="text-[11px] font-semibold uppercase tracking-wider text-(--text-secondary)">
 									Email Address
 								</Label>
 								<div className="relative">
-									<Mail className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-(--text-secondary)" />
+									<Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-(--text-secondary)" />
 									<Input
 										type="email"
 										placeholder="name@example.com"
 										value={email}
 										onChange={(e) => setEmail(e.target.value)}
 										required
-										className="pl-10 h-10 bg-(--bg) text-sm border-(--border) text-(--text) placeholder:text-(--text-secondary)/50 focus-visible:ring-(--link) focus-visible:border-(--link) rounded-md"
+										className="h-10 rounded-md border-(--border) bg-(--bg) pl-10 text-sm text-(--text) placeholder:text-(--text-secondary)/60 focus-visible:border-[#1B4332] focus-visible:ring-[#1B4332]/20"
 									/>
 								</div>
 							</div>
 
-							<div className="space-y-2">
-								<Label className="text-xs uppercase font-semibold text-(--text-secondary) tracking-wider">
+							<div className="space-y-1.5">
+								<Label className="text-[11px] font-semibold uppercase tracking-wider text-(--text-secondary)">
 									Password
 								</Label>
 								<div className="relative">
-									<Lock className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-(--text-secondary)" />
+									<Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-(--text-secondary)" />
 									<Input
 										type="password"
 										placeholder="••••••••"
 										value={password}
 										onChange={(e) => setPassword(e.target.value)}
 										required
-										className="pl-10 h-10 bg-(--bg) text-sm border-(--border) text-(--text) placeholder:text-(--text-secondary)/50 focus-visible:ring-(--link) focus-visible:border-(--link) rounded-md"
+										className="h-10 rounded-md border-(--border) bg-(--bg) pl-10 text-sm text-(--text) placeholder:text-(--text-secondary)/60 focus-visible:border-[#1B4332] focus-visible:ring-[#1B4332]/20"
 									/>
 								</div>
 							</div>
@@ -142,49 +152,33 @@ function Login() {
 							<Button
 								type="submit"
 								disabled={isLoading}
-								className="w-full h-10 rounded-md bg-(--link) hover:bg-(--link-hover) text-white font-medium text-sm transition-all active:scale-[0.98] mt-2 shadow-md shadow-indigo-950/40"
+								className="mt-2 h-10 w-full rounded-md bg-[#1B4332] text-sm font-semibold text-white shadow-sm transition-all hover:bg-[#2D6A4F] active:scale-[0.98]"
 							>
 								{isLoading ? (
-									<Loader2 className="w-4 h-4 animate-spin" />
+									<Loader2 className="h-4 w-4 animate-spin" />
 								) : (
 									"Sign In"
 								)}
 							</Button>
 						</form>
 
-						<div className="relative flex items-center justify-center my-4">
-							<span className="w-full border-t border-border" />
-							<span className="absolute bg-(--bg-secondary) px-3 text-[10px] uppercase tracking-widest text-(--text-secondary)">
-								Or
+						<div className="relative my-4 flex items-center justify-center">
+							<span className="w-full border-t border-(--border)" />
+							<span className="absolute bg-(--bg-secondary) px-3 text-[10px] font-semibold uppercase tracking-widest text-(--text-secondary)">
+								Or continue with
 							</span>
 						</div>
 
 						<Button
 							type="button"
-							className="w-full h-10 gap-2.5 rounded-md border-(--border) bg-(--bg) hover:bg-(--bg)/50 ( text-(--text) text-xs font-medium transition-colors"
+							variant="outline"
+							className="h-10 w-full gap-2.5 rounded-md border-(--border) bg-(--bg) text-xs font-semibold text-(--text) transition-colors hover:bg-(--bg-subtle)"
 							onClick={() => handleSocialLogin("github")}
 						>
-							<Github className="w-4 h-4 text-(--text-secondary)" />
-							Continue with GitHub
+							<Github className="h-4 w-4 text-(--text-secondary)" />
+							GitHub
 						</Button>
 					</CardContent>
-
-					{/* 	<CardFooter className="flex flex-col items-center pt-2 pb-6">
-					 <button
-                            type="button"
-                            onClick={() =>
-                                navigate({
-                                    to: "/dashboard",
-                                    search: { limit: 10, page: 1, tab: "" },
-                                })
-                            }
-                            className="text-xs text-(--text-secondary) hover:text-(--text) underline underline-offset-4 transition-colors"
-                        >
-                            Skip & continue as guest
-                        </button>
- 
-
-					</CardFooter> */}
 				</Card>
 			</main>
 		</div>

@@ -1,11 +1,11 @@
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
-import { Store } from "@tauri-apps/plugin-store";
 import { PendingComponent } from "#/components/ui/loading-component";
 import { authClient } from "#/lib/auth-client";
+import { getAppStore, getSecureToken } from "#/lib/secure-token";
 
 export const Route = createFileRoute("/__routes")({
 	beforeLoad: async ({ location }) => {
-		const store = await Store.load("app-settings.json");
+		const store = await getAppStore();
 		try {
 			await store.reload();
 		} catch (e) {
@@ -13,29 +13,36 @@ export const Route = createFileRoute("/__routes")({
 			await store.clear();
 		}
 
-		const token = store
-			? await store.get<string>("better-auth.session_token")
-			: undefined;
+		const token = await getSecureToken();
 
-		const session = token
-			? await authClient
-					.getSession({
-						fetchOptions: {
-							headers: { authorization: `Bearer ${token}` },
-						},
-					})
-					.then((res) => res.data)
-					.catch((err) => {
-						console.error("Failed to fetch session", err);
-						return null;
-					})
-			: null;
+		let session = null;
+		if (token) {
+			try {
+				const res = await authClient.getSession({
+					fetchOptions: {
+						headers: { authorization: `Bearer ${token}` },
+					},
+				});
+				session = res.data;
+				if (session?.user) {
+					await store.set("cached_user", session);
+					await store.save();
+				}
+			} catch (err) {
+				console.warn(
+					"Failed to fetch online session, checking offline cache:",
+					err,
+				);
+				const cached = await store.get<typeof session>("cached_user");
+				if (cached?.user && cached?.session) {
+					session = cached;
+				}
+			}
+		}
 
 		const isFirstTime = store
 			? ((await store.get<boolean>("isFirstTime")) ?? true)
 			: true;
-
-		// console.log("test", { token, isFirstTime });
 
 		if (isFirstTime && !session && location.pathname !== "/") {
 			throw redirect({
