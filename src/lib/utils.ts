@@ -8,8 +8,14 @@ export function cn(...inputs: ClassValue[]) {
 	return twMerge(clsx(inputs));
 }
 
+export const API_URL =
+	import.meta.env.VITE_API_URL ||
+	(import.meta.env.PROD
+		? "https://todo-api.cakwei.dev"
+		: "http://localhost:3001");
+
 export const axios = Axios.create({
-	baseURL: `${import.meta.env.VITE_API_URL}/api`,
+	baseURL: `${API_URL}/api`,
 	withCredentials: true, // Replaces credentials: "include" for Fastify CORS cookies
 });
 

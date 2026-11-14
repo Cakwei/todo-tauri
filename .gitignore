@@ -13,3 +13,4 @@ __unconfig*
 todos.json
 src-backend/src/generated/*
 package-lock.json
+.env.*

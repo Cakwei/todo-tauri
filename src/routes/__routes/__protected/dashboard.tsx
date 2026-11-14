@@ -87,7 +87,7 @@ import {
 } from "#/lib/offline-db";
 import { deleteSecureToken } from "#/lib/secure-token";
 import { registerQuickCaptureShortcut } from "#/lib/shortcuts";
-import { axios } from "#/lib/utils";
+import { API_URL, axios } from "#/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -220,7 +220,7 @@ const wifiConnectionQueryOptions = () =>
 				return false;
 			}
 			try {
-				const healthUrl = `${import.meta.env.VITE_API_URL}/api/health`;
+				const healthUrl = `${API_URL}/api/health`;
 				return await invoke<boolean>("is_online", { url: healthUrl });
 			} catch {
 				return typeof navigator !== "undefined" ? navigator.onLine : true;
